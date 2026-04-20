@@ -5,7 +5,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes
 )
-from groq import Groq
+from openai import OpenAI
 
 # ── CONFIG ──────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -16,8 +16,11 @@ OWNER_CHAT_ID = int(os.environ.get("OWNER_CHAT_ID", "448609289"))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── GROQ CLIENT ──────────────────────────────────────────────────────────
-client = Groq(api_key=GROQ_API_KEY)
+# ── GROQ CLIENT (via OpenAI-compatible API) ───────────────────────────────
+client = OpenAI(
+    api_key=GROQ_API_KEY,
+    base_url="https://api.groq.com/openai/v1"
+)
 
 SYSTEM_PROMPT = """Ты — AI-агент компании WeOneRent, аренда автомобилей в Испании.
 Твоя задача: вежливо и дружелюбно собрать заявку от клиента.
