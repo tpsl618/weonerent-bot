@@ -12,64 +12,39 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 OWNER_CHAT_ID = int(os.environ.get("OWNER_CHAT_ID", "448609289"))
 
-# ── LOGGING ─────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# ── KEYBOARDS ────────────────────────────────────────────────────────────
-CAR_TYPE_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        ["🚗 Эконом", "🚙 Комфорт"],
-        ["🚕 SUV", "🚌 Минивэн"],
-    ],
-    resize_keyboard=True,
-    one_time_keyboard=True
-)
+# ── СОСТОЯНИЯ ────────────────────────────────────────────────────────────
+STEP_CITY    = 0
+STEP_DATES   = 1
+STEP_CAR     = 2
+STEP_NAME    = 3
+STEP_PHONE   = 4
+STEP_DONE    = 5
 
+# ── КЛАВИАТУРЫ ───────────────────────────────────────────────────────────
+CAR_KEYBOARD = ReplyKeyboardMarkup(
+    [["🚗 Эконом", "🚙 Комфорт"], ["🚕 SUV", "🚌 Минивэн"]],
+    resize_keyboard=True, one_time_keyboard=True
+)
 PHONE_KEYBOARD = ReplyKeyboardMarkup(
-    [[KeyboardButton("📱 Отправить мой номер", request_contact=True)]],
-    resize_keyboard=True,
-    one_time_keyboard=True
+    [[KeyboardButton("📱 Поделиться номером", request_contact=True)]],
+    resize_keyboard=True, one_time_keyboard=True
 )
+REMOVE = ReplyKeyboardRemove()
 
-REMOVE_KEYBOARD = ReplyKeyboardRemove()
+# ── ХРАНИЛИЩЕ ────────────────────────────────────────────────────────────
+# user_data[chat_id] = {"step": int, "city": str, "dates": str, ...}
+user_data = {}
 
-SYSTEM_PROMPT = """Ты — AI-агент компании WeOneRent, аренда автомобилей в Испании.
-Твоя задача: вежливо и дружелюбно собрать заявку от клиента.
-
-Языки: русский и английский. Отвечай на том языке на котором пишет клиент.
-
-Задавай вопросы строго по порядку, по одному за раз:
-1. Спроси город (где нужна машина)
-2. Спроси даты (минимальный срок — 3 суток)
-3. Спроси тип авто — ОБЯЗАТЕЛЬНО добавь маркер [SHOW_CAR_TYPES] в конце сообщения
-4. Спроси имя и фамилию
-5. Спроси телефон — ОБЯЗАТЕЛЬНО добавь маркер [SHOW_PHONE] в конце сообщения
-
-После получения ВСЕХ 5 данных (город, даты, тип авто, имя, телефон) — выведи итоговую сводку в формате:
-✅ Заявка принята!
-📍 Город: ...
-📅 Даты: ...
-🚗 Авто: ...
-👤 Имя: ...
-📱 Телефон: ...
-Менеджер свяжется с вами в течение 15 минут.
-ОБЯЗАТЕЛЬНО добавь в конце этого сообщения маркер: [ЗАЯВКА ГОТОВА]
-Этот маркер ОБЯЗАТЕЛЕН — без него заявка не будет отправлена менеджеру.
-
-Важно:
-- Не придумывай цены — говори что менеджер озвучит точную стоимость
-- Если спрашивают о депозите — отвечай: "Депозит зависит от выбранного вида страховки. Менеджер подробно расскажет обо всех условиях."
-- Если спрашивают о доставке — говори что доставка авто возможна в любую точку
-- Если клиент задаёт сложные вопросы о страховке, условиях или ценах — говори что переключаешь на менеджера и добавляй маркер [ПЕРЕКЛЮЧИТЬ НА МЕНЕДЖЕРА]
-- Будь кратким, не пиши длинных абзацев
-- Задавай строго по одному вопросу за раз
-- НЕ включай маркеры [SHOW_CAR_TYPES], [SHOW_PHONE], [ЗАЯВКА ГОТОВА], [ПЕРЕКЛЮЧИТЬ НА МЕНЕДЖЕРА] в текст для клиента"""
-
-# Хранилище истории сообщений
-user_histories = {}
+SYSTEM_PROMPT = """Ты — вежливый помощник WeOneRent, аренда автомобилей в Испании.
+Отвечай на языке клиента (русский или английский).
+Будь дружелюбным и кратким. Не придумывай цены.
+Если спрашивают о депозите: депозит зависит от страховки, менеджер расскажет подробнее.
+Если сложный вопрос о ценах/страховке — скажи что переключаешь на менеджера."""
 
 def call_groq(messages):
     headers = {
@@ -79,163 +54,157 @@ def call_groq(messages):
     payload = {
         "model": "llama-3.3-70b-versatile",
         "messages": messages,
-        "max_tokens": 1024,
+        "max_tokens": 512,
         "temperature": 0.7
     }
     resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]
 
+def get_user(chat_id):
+    if chat_id not in user_data:
+        user_data[chat_id] = {"step": STEP_CITY, "history": []}
+    return user_data[chat_id]
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    user_histories[chat_id] = []
+    user_data[chat_id] = {"step": STEP_CITY, "history": []}
     await update.message.reply_text(
-        "👋 *Привет! Я помощник WeOneRent*\n"
+        "👋 Привет! Я помощник WeOneRent\n"
         "🇪🇸 Аренда автомобилей в Испании\n\n"
-        "🚗 Помогу оформить заявку за 2 минуты\n"
-        "📞 Менеджер свяжется в течение 15 минут\n\n"
+        "Помогу оформить заявку за 2 минуты.\n"
+        "Менеджер свяжется в течение 15 минут.\n\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
-        "🏙 *В каком городе вам нужна машина?*\n\n"
-        "_(Барселона, Мадрид, Малага, Аликанте...)_\n\n"
-        "━━━━━━━━━━━━━━━━━━\n\n"
-        "👋 *Hi! I'm WeOneRent assistant*\n"
-        "🇪🇸 Car rental in Spain\n\n"
-        "🏙 *Which city do you need a car in?*",
-        parse_mode="Markdown",
-        reply_markup=REMOVE_KEYBOARD
+        "🏙 В каком городе вам нужна машина?\n"
+        "(Барселона, Мадрид, Малага, Аликанте...)\n\n"
+        "🏙 Which city do you need a car in?",
+        reply_markup=REMOVE
     )
+
+async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    user_data[chat_id] = {"step": STEP_CITY, "history": []}
+    await update.message.reply_text("🔄 Начнём сначала! Напиши /start", reply_markup=REMOVE)
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global OWNER_CHAT_ID
     if update.effective_user.username == "fake_smm":
         OWNER_CHAT_ID = update.effective_chat.id
-        await update.message.reply_text(
-            f"✅ Зарегистрирован как владелец.\n"
-            f"Chat ID: `{OWNER_CHAT_ID}`\n"
-            f"Заявки будут приходить сюда.",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"✅ Готово. Chat ID: {OWNER_CHAT_ID}")
     else:
         await update.message.reply_text("❌ Нет доступа.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    ud = get_user(chat_id)
 
-    # Обработка контакта (кнопка телефона)
+    # Получаем текст (обычный или контакт)
     if update.message.contact:
         phone = update.message.contact.phone_number
-        user_message = f"+{phone}" if not phone.startswith("+") else phone
+        text = f"+{phone}" if not phone.startswith("+") else phone
     else:
-        user_message = update.message.text
+        text = update.message.text
 
-    if chat_id not in user_histories:
-        user_histories[chat_id] = []
-
-    user_histories[chat_id].append({"role": "user", "content": user_message})
+    step = ud["step"]
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + user_histories[chat_id]
-        assistant_message = call_groq(messages)
-        user_histories[chat_id].append({"role": "assistant", "content": assistant_message})
+        if step == STEP_CITY:
+            ud["city"] = text
+            ud["step"] = STEP_DATES
+            reply = ask_groq(ud, f"Клиент выбрал город: {text}. Спроси на какие даты нужен автомобиль (минимум 3 суток).")
+            await update.message.reply_text(reply, reply_markup=REMOVE)
 
-        # Очищаем маркеры из текста для клиента
-        clean_message = (
-            assistant_message
-            .replace("[ЗАЯВКА ГОТОВА]", "")
-            .replace("[ПЕРЕКЛЮЧИТЬ НА МЕНЕДЖЕРА]", "")
-            .replace("[SHOW_CAR_TYPES]", "")
-            .replace("[SHOW_PHONE]", "")
-            .strip()
-        )
+        elif step == STEP_DATES:
+            ud["dates"] = text
+            ud["step"] = STEP_CAR
+            reply = ask_groq(ud, f"Клиент указал даты: {text}. Спроси какой тип авто нужен.")
+            await update.message.reply_text(reply, reply_markup=CAR_KEYBOARD)
 
-        # Определяем клавиатуру
-        if "[SHOW_CAR_TYPES]" in assistant_message:
-            keyboard = CAR_TYPE_KEYBOARD
-        elif "[SHOW_PHONE]" in assistant_message:
-            keyboard = PHONE_KEYBOARD
-        elif "[ЗАЯВКА ГОТОВА]" in assistant_message:
-            keyboard = REMOVE_KEYBOARD
-        else:
-            keyboard = None
+        elif step == STEP_CAR:
+            ud["car"] = text.replace("🚗 ", "").replace("🚙 ", "").replace("🚕 ", "").replace("🚌 ", "")
+            ud["step"] = STEP_NAME
+            reply = ask_groq(ud, f"Клиент выбрал тип авто: {text}. Спроси имя и фамилию.")
+            await update.message.reply_text(reply, reply_markup=REMOVE)
 
-        if keyboard is not None:
-            await update.message.reply_text(clean_message, reply_markup=keyboard)
-        else:
-            await update.message.reply_text(clean_message)
+        elif step == STEP_NAME:
+            ud["name"] = text
+            ud["step"] = STEP_PHONE
+            reply = ask_groq(ud, f"Клиент представился: {text}. Попроси номер телефона с кодом страны.")
+            await update.message.reply_text(reply, reply_markup=PHONE_KEYBOARD)
 
-        if "[ЗАЯВКА ГОТОВА]" in assistant_message:
-            await send_lead_to_owner(update, context, chat_id, clean_message)
+        elif step == STEP_PHONE:
+            ud["phone"] = text
+            ud["step"] = STEP_DONE
 
-        if "[ПЕРЕКЛЮЧИТЬ НА МЕНЕДЖЕРА]" in assistant_message:
-            await notify_manager(update, context, chat_id)
+            # Итоговое сообщение клиенту
+            summary = (
+                f"✅ Заявка принята!\n\n"
+                f"📍 Город: {ud.get('city', '—')}\n"
+                f"📅 Даты: {ud.get('dates', '—')}\n"
+                f"🚗 Авто: {ud.get('car', '—')}\n"
+                f"👤 Имя: {ud.get('name', '—')}\n"
+                f"📱 Телефон: {ud.get('phone', '—')}\n\n"
+                f"Менеджер свяжется с вами в течение 15 минут. 🙌"
+            )
+            await update.message.reply_text(summary, reply_markup=REMOVE)
+
+            # Отправка заявки владельцу — ГАРАНТИРОВАННО
+            await send_lead_to_owner(update, context, chat_id, ud)
+
+        elif step == STEP_DONE:
+            await update.message.reply_text(
+                "✅ Ваша заявка уже принята! Менеджер скоро свяжется.\n\n"
+                "Чтобы создать новую заявку, напиши /start",
+                reply_markup=REMOVE
+            )
 
     except Exception as e:
         logger.error(f"Ошибка: {e}")
         await update.message.reply_text(
-            "⚠️ Технический сбой. Напишите нам напрямую: @weonerent",
-            reply_markup=REMOVE_KEYBOARD
+            "⚠️ Технический сбой. Напишите нам: @weonerent",
+            reply_markup=REMOVE
         )
 
-async def send_lead_to_owner(update, context, client_chat_id, summary):
-    global OWNER_CHAT_ID
-    if not OWNER_CHAT_ID:
-        return
+def ask_groq(ud, prompt):
+    """Задаём вопрос через Groq с контекстом разговора."""
+    ud["history"].append({"role": "user", "content": prompt})
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + ud["history"]
+    reply = call_groq(messages)
+    ud["history"].append({"role": "assistant", "content": reply})
+    return reply
 
+async def send_lead_to_owner(update, context, client_chat_id, ud):
+    """Отправка заявки владельцу — вызывается ВСЕГДА при STEP_DONE."""
     user = update.effective_user
     username = f"@{user.username}" if user.username else f"ID: {client_chat_id}"
-    name = user.full_name or "Неизвестно"
+    name_tg = user.full_name or "Неизвестно"
 
-    lead_message = (
-        f"🔔 *НОВАЯ ЗАЯВКА — WeOneRent*\n"
-        f"{'━' * 25}\n"
-        f"👤 {name}\n"
-        f"📱 {username}\n"
-        f"{'━' * 25}\n\n"
-        f"{summary}\n\n"
-        f"{'━' * 25}\n"
-        f"💬 [Написать клиенту](tg://user?id={client_chat_id})"
+    lead = (
+        f"🔔 НОВАЯ ЗАЯВКА — WeOneRent\n"
+        f"{'━' * 28}\n"
+        f"👤 {name_tg} ({username})\n"
+        f"{'━' * 28}\n"
+        f"📍 Город: {ud.get('city', '—')}\n"
+        f"📅 Даты: {ud.get('dates', '—')}\n"
+        f"🚗 Авто: {ud.get('car', '—')}\n"
+        f"👤 Имя: {ud.get('name', '—')}\n"
+        f"📱 Телефон: {ud.get('phone', '—')}\n"
+        f"{'━' * 28}\n"
+        f"💬 tg://user?id={client_chat_id}"
     )
 
     try:
-        await context.bot.send_message(
-            chat_id=OWNER_CHAT_ID,
-            text=lead_message,
-            parse_mode="Markdown"
-        )
-        logger.info(f"Заявка отправлена от {username}")
+        await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=lead)
+        logger.info(f"✅ Заявка отправлена от {username} владельцу {OWNER_CHAT_ID}")
     except Exception as e:
-        logger.error(f"Не удалось отправить заявку: {e}")
-
-async def notify_manager(update, context, client_chat_id):
-    global OWNER_CHAT_ID
-    if not OWNER_CHAT_ID:
-        return
-    user = update.effective_user
-    username = f"@{user.username}" if user.username else f"ID: {client_chat_id}"
-    try:
-        await context.bot.send_message(
-            chat_id=OWNER_CHAT_ID,
-            text=f"⚡️ *Клиент {username} задал сложный вопрос* — требуется менеджер.\n"
-                 f"💬 [Написать клиенту](tg://user?id={client_chat_id})",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        logger.error(f"Ошибка уведомления: {e}")
-
-async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_histories[chat_id] = []
-    await update.message.reply_text(
-        "🔄 Начнём сначала!\nНажми /start",
-        reply_markup=REMOVE_KEYBOARD
-    )
+        logger.error(f"❌ Не удалось отправить заявку: {e}")
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin))
     app.add_handler(CommandHandler("reset", reset))
+    app.add_handler(CommandHandler("admin", admin))
     app.add_handler(MessageHandler(filters.CONTACT, handle_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен...")
