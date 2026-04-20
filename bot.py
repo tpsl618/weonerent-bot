@@ -1,11 +1,11 @@
 import os
 import logging
+import requests
 from telegram import Update
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes
 )
-from openai import OpenAI
 
 # ── CONFIG ──────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -16,11 +16,7 @@ OWNER_CHAT_ID = int(os.environ.get("OWNER_CHAT_ID", "448609289"))
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── GROQ CLIENT (via OpenAI-compatible API) ───────────────────────────────
-client = OpenAI(
-    api_key=GROQ_API_KEY,
-    base_url="https://api.groq.com/openai/v1"
-)
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 SYSTEM_PROMPT = """Ты — AI-агент компании WeOneRent, аренда автомобилей в Испании.
 Твоя задача: вежливо и дружелюбно собрать заявку от клиента.
@@ -47,6 +43,22 @@ SYSTEM_PROMPT = """Ты — AI-агент компании WeOneRent, аренд
 
 # Хранилище истории сообщений
 user_histories = {}
+
+def call_groq(messages):
+    """Вызов Groq API через requests — без зависимостей от openai/groq SDK."""
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": messages,
+        "max_tokens": 1024,
+        "temperature": 0.7
+    }
+    resp = requests.post(GROQ_URL, headers=headers, json=payload, timeout=30)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -84,13 +96,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + user_histories[chat_id],
-            max_tokens=1024,
-            temperature=0.7
-        )
-        assistant_message = response.choices[0].message.content
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + user_histories[chat_id]
+        assistant_message = call_groq(messages)
         user_histories[chat_id].append({"role": "assistant", "content": assistant_message})
 
         clean_message = assistant_message.replace("[ЗАЯВКА ГОТОВА]", "").replace("[ПЕРЕКЛЮЧИТЬ НА МЕНЕДЖЕРА]", "").strip()
