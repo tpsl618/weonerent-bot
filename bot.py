@@ -160,9 +160,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keyboard = None
 
         if keyboard is not None:
-            await update.message.reply_text(clean_message, reply_markup=keyboard, parse_mode="Markdown")
+            await update.message.reply_text(clean_message, reply_markup=keyboard)
         else:
-            await update.message.reply_text(clean_message, parse_mode="Markdown")
+            await update.message.reply_text(clean_message)
 
         if "[ЗАЯВКА ГОТОВА]" in assistant_message:
             await send_lead_to_owner(update, context, chat_id, clean_message)
