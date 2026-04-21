@@ -202,6 +202,14 @@ def schedule_all_posts(app):
             )
             count += 1
 
+    # Еженедельный отчёт — каждый понедельник в 08:00 МСК
+    app.job_queue.run_repeating(
+        send_weekly_report,
+        interval=60 * 60 * 24 * 7,
+        first=dtime(8, 0, tzinfo=MSK),
+        name="weekly_report",
+    )
+
     # Вечная ротация лайфхаков — каждый пн 09:30 и чт 19:30 МСК
     # Запускается начиная с 23 июня (после окончания основного расписания)
     rotation_start = MSK.localize(datetime(2026, 6, 23, 0, 0))
@@ -298,6 +306,36 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data[chat_id] = {"step": STEP_CITY}
     await update.message.reply_text("Отменено.", reply_markup=REMOVE)
 
+FAQ_TEXT = (
+    "❓ Часто задаваемые вопросы\n\n"
+    "1. Какой минимальный срок аренды?\n"
+    "→ 3 суток\n\n"
+    "2. Нужна ли кредитная карта?\n"
+    "→ Карта нужна для залога €500–1500. Подойдёт Wise или Revolut. "
+    "У нас можно обсудить альтернативы.\n\n"
+    "3. Примут ли права из СНГ?\n"
+    "→ Да. Рекомендуем иметь МВУ (международное удостоверение).\n\n"
+    "4. Есть ли доставка авто?\n"
+    "→ Да, во всех наших городах. Доп. стоимость €15–30.\n\n"
+    "5. Что включает страховка?\n"
+    "→ Базовая CDW с франшизой. Можно доплатить за SCDW (без франшизы).\n\n"
+    "6. Можно взять авто в одном городе, сдать в другом?\n"
+    "→ Да, one-way аренда. Доплата €50–200 в зависимости от маршрута.\n\n"
+    "7. Есть ли детское кресло?\n"
+    "→ Да. Для подписчиков канала @weonerent — бесплатно.\n\n"
+    "8. Как быстро ответит менеджер?\n"
+    "→ В течение 15 минут в рабочее время.\n\n"
+    "9. Можно отменить бронь?\n"
+    "→ Да, бесплатно за 48 часов до выезда.\n\n"
+    "10. В каких городах работаете?\n"
+    "→ Барселона, Мадрид, Малага, Аликанте, Валенсия, "
+    "Севилья, Тенерифе, Гран-Канария.\n\n"
+    "Остался вопрос? Напишите — ответим 👇"
+)
+
+async def faq_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(FAQ_TEXT, reply_markup=KEYBOARDS["soft"])
+
 async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Быстрый расчёт цены: /price Барселона SUV 7"""
     args = context.args
@@ -387,6 +425,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if step == STEP_CITY:
             ud["city"] = text
             ud["step"] = STEP_DATES
+            track_start()
             # Планируем напоминание через 2 часа если не завершит
             context.job_queue.run_once(
                 remind_abandoned,
@@ -435,6 +474,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Менеджер свяжется с вами в течение 15 минут."
             )
             await update.message.reply_text(summary, reply_markup=REMOVE)
+            track_lead(ud.get("city", "unknown"))
             await send_lead(update, context, chat_id, ud)
             await update.message.reply_text(
                 "В нашем канале — лайфхаки про аренду авто, маршруты и актуальные цены.",
@@ -454,6 +494,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ─── Отправка лида ──────────────────────────────────────────────
+# ─── Еженедельный отчёт ─────────────────────────────────────────
+weekly_stats = {"leads": 0, "started": 0, "cities": {}}
+
+def track_lead(city: str):
+    weekly_stats["leads"] += 1
+    c = city.lower().strip()
+    weekly_stats["cities"][c] = weekly_stats["cities"].get(c, 0) + 1
+
+def track_start():
+    weekly_stats["started"] += 1
+
+async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
+    stats = weekly_stats.copy()
+    weekly_stats["leads"]   = 0
+    weekly_stats["started"] = 0
+    weekly_stats["cities"]  = {}
+
+    cities_text = "\n".join(
+        f"  {c.capitalize()}: {n}" for c, n in
+        sorted(stats["cities"].items(), key=lambda x: -x[1])
+    ) or "  —"
+
+    conversion = (
+        f"{round(stats['leads'] / stats['started'] * 100)}%"
+        if stats["started"] > 0 else "—"
+    )
+
+    report = (
+        f"📊 Еженедельный отчёт WeOneRent\n"
+        f"{'─' * 25}\n"
+        f"Начали заявку: {stats['started']}\n"
+        f"Завершили заявку: {stats['leads']}\n"
+        f"Конверсия: {conversion}\n"
+        f"{'─' * 25}\n"
+        f"По городам:\n{cities_text}\n"
+        f"{'─' * 25}\n"
+        f"Следующий пост в канале: смотри /status"
+    )
+    try:
+        await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=report)
+    except Exception as e:
+        logger.error(f"Weekly report error: {e}")
+
 async def remind_abandoned(context: ContextTypes.DEFAULT_TYPE):
     """Напоминание если человек остановился на середине заявки"""
     chat_id = context.job.data["chat_id"]
@@ -508,6 +591,7 @@ def main():
     app.add_handler(CommandHandler("status",  status_cmd))
     app.add_handler(CommandHandler("cancel",  cancel_cmd))
     app.add_handler(CommandHandler("price",   price_cmd))
+    app.add_handler(CommandHandler("faq",     faq_cmd))
     app.add_handler(MessageHandler(filters.CONTACT, handle_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен. Автопостинг активен.")
