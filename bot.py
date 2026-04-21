@@ -9,8 +9,9 @@ from telegram import (
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    filters, ContextTypes
+    ChatMemberHandler, filters, ContextTypes
 )
+from telegram.constants import ChatMemberStatus
 from datetime import time as dtime
 from itertools import cycle
 from content import SCHEDULED_POSTS, LIFEHACKS
@@ -18,8 +19,9 @@ from content import SCHEDULED_POSTS, LIFEHACKS
 BOT_TOKEN      = os.environ["BOT_TOKEN"]
 GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
 OWNER_CHAT_ID  = int(os.environ.get("OWNER_CHAT_ID", "448609289"))
-CHANNEL_ID     = os.environ.get("CHANNEL_ID", "@weonerent")
-ADMIN_USERNAME = "fake_smm"
+CHANNEL_ID        = os.environ.get("CHANNEL_ID", "@weonerent")
+DISCUSSION_GROUP  = os.environ.get("DISCUSSION_GROUP", "")   # ID группы обсуждения
+ADMIN_USERNAME    = "fake_smm"
 
 MSK = pytz.timezone("Europe/Moscow")
 
@@ -581,6 +583,37 @@ async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Weekly report error: {e}")
 
+async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Приветствие новых участников группы обсуждения"""
+    result = update.chat_member
+    # Только когда статус меняется на "участник" (не бот, не повторный вход)
+    old_status = result.old_chat_member.status
+    new_status = result.new_chat_member.status
+    user       = result.new_chat_member.user
+
+    if user.is_bot:
+        return
+    if old_status in (ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER):
+        return
+    if new_status != ChatMemberStatus.MEMBER:
+        return
+
+    name = user.first_name or "Привет"
+    await context.bot.send_message(
+        chat_id=result.chat.id,
+        text=(
+            f"👋 {name}, добро пожаловать в чат WeOneRent!\n\n"
+            "Здесь можно задавать вопросы про аренду авто в Испании, "
+            "обсуждать маршруты и делиться опытом.\n\n"
+            "Если нужна аренда — оформите заявку прямо сейчас, "
+            "менеджер ответит в течение 15 минут 👇"
+        ),
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✈️ Оставить заявку", url="https://t.me/weonerent_ai_bot")],
+            [InlineKeyboardButton("📢 Канал @weonerent", url="https://t.me/weonerent")],
+        ])
+    )
+
 async def remind_abandoned(context: ContextTypes.DEFAULT_TYPE):
     """Напоминание если человек остановился на середине заявки"""
     chat_id = context.job.data["chat_id"]
@@ -636,6 +669,7 @@ def main():
     app.add_handler(CommandHandler("cancel",  cancel_cmd))
     app.add_handler(CommandHandler("price",   price_cmd))
     app.add_handler(CommandHandler("faq",     faq_cmd))
+    app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.CONTACT, handle_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен. Автопостинг активен.")
