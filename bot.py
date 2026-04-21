@@ -11,7 +11,9 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes
 )
-from content import SCHEDULED_POSTS
+from datetime import time as dtime
+from itertools import cycle
+from content import SCHEDULED_POSTS, LIFEHACKS
 
 BOT_TOKEN      = os.environ["BOT_TOKEN"]
 GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
@@ -79,8 +81,9 @@ BUTTON_MAP = {
     "❌ Без кнопок": None,
 }
 
-# ─── Данные пользователей ───────────────────────────────────────
+# ─── Данные пользователей и ротация лайфхаков ───────────────────
 user_data = {}
+lifehack_cycle = cycle(LIFEHACKS)   # бесконечная ротация
 
 def get_user(chat_id):
     if chat_id not in user_data:
@@ -119,9 +122,24 @@ async def auto_publish(context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+# ─── Callback для ротации лайфхаков ─────────────────────────────
+async def publish_lifehack(context: ContextTypes.DEFAULT_TYPE):
+    text = next(lifehack_cycle)
+    try:
+        await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=text,
+            reply_markup=KEYBOARDS["soft"],
+        )
+        logger.info(f"Lifehack published at {datetime.now(MSK).strftime('%d.%m %H:%M')}")
+    except Exception as e:
+        logger.error(f"Lifehack publish error: {e}")
+
 # ─── Планировщик: запускается при старте бота ───────────────────
 def schedule_all_posts(app):
     now = datetime.now(MSK)
+
+    # Разовые посты (Недели 1–8)
     count = 0
     for post in SCHEDULED_POSTS:
         when = post["when"]
@@ -133,7 +151,23 @@ def schedule_all_posts(app):
                 name=f"post_{when.strftime('%d%m_%H%M')}",
             )
             count += 1
-    logger.info(f"Запланировано {count} постов из {len(SCHEDULED_POSTS)}")
+
+    # Вечная ротация лайфхаков — каждый пн 09:30 и чт 19:30 МСК
+    # Запускается начиная с 23 июня (после окончания основного расписания)
+    rotation_start = MSK.localize(datetime(2026, 6, 23, 0, 0))
+    if now < rotation_start:
+        delay = (rotation_start - now).total_seconds()
+    else:
+        delay = 0
+
+    app.job_queue.run_repeating(
+        publish_lifehack,
+        interval=60 * 60 * 24 * 7 / 2,   # дважды в неделю (каждые 3.5 дня)
+        first=rotation_start if now < rotation_start else now,
+        name="lifehack_rotation",
+    )
+
+    logger.info(f"Запланировано {count} постов + вечная ротация лайфхаков")
     return count
 
 # ─── Команды ────────────────────────────────────────────────────
