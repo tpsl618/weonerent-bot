@@ -23,10 +23,18 @@ CHANNEL_ID        = os.environ.get("CHANNEL_ID", "@weonerent")
 DISCUSSION_GROUP  = os.environ.get("DISCUSSION_GROUP", "")   # ID группы обсуждения
 ADMIN_USERNAME    = os.environ.get("ADMIN_USERNAME", "")   # Telegram username без @
 
+def get_manager_url() -> str:
+    return f"https://t.me/{ADMIN_USERNAME}" if ADMIN_USERNAME else "https://t.me/weonerent"
+
 MSK = pytz.timezone("Europe/Moscow")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def is_working_hours() -> bool:
+    """Рабочее время менеджера: 9:00–20:00 МСК, ежедневно"""
+    hour = datetime.now(MSK).hour
+    return 9 <= hour < 20
 
 # ─── Шаги заявки ────────────────────────────────────────────────
 STEP_CITY  = 0
@@ -100,13 +108,16 @@ SUBSCRIBE_KEYBOARD = InlineKeyboardMarkup([
      InlineKeyboardButton("🌐 Сайт", url="https://weonerent.es")]
 ])
 
-# ─── Главное меню ────────────────────────────────────────────────
-MAIN_MENU = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🚗 Оставить заявку",     callback_data="menu_apply")],
-    [InlineKeyboardButton("💰 Узнать стоимость",    callback_data="menu_price"),
-     InlineKeyboardButton("ℹ️ О сервисе",            callback_data="menu_faq")],
-    [InlineKeyboardButton("📞 Написать менеджеру",  url="https://t.me/fake_smm")],
-])
+# ─── Главное меню (строится динамически, чтобы URL менеджера всегда актуален) ──
+def build_main_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚗 Оставить заявку",    callback_data="menu_apply")],
+        [InlineKeyboardButton("💰 Узнать стоимость",   callback_data="menu_price"),
+         InlineKeyboardButton("ℹ️ О сервисе",           callback_data="menu_faq")],
+        [InlineKeyboardButton("📞 Написать менеджеру", url=get_manager_url())],
+    ])
+
+MAIN_MENU = build_main_menu()   # статическая копия — обновляется при старте
 
 KEYBOARDS = {
     "full": InlineKeyboardMarkup([
@@ -387,19 +398,23 @@ def schedule_all_posts(app):
     return count
 
 # ─── Команды ────────────────────────────────────────────────────
-WELCOME_TEXT = (
-    "Привет! 👋 Я — виртуальный ассистент WeOneRent.\n\n"
-    "Помогу подобрать автомобиль в Испании и оформить заявку за пару минут. "
-    "Менеджер обработает заявку в течение 5 минут в рабочее время.\n\n"
-    "Чем могу помочь?"
-)
+def get_welcome_text() -> str:
+    if is_working_hours():
+        timing = "Менеджер ответит в течение 5 минут."
+    else:
+        timing = "Сейчас нерабочее время (9:00–20:00 МСК) — менеджер ответит по возможности."
+    return (
+        "Привет! 👋 Помогу подобрать и забронировать авто в Испании.\n\n"
+        f"{timing}\n\n"
+        "Чем могу помочь?"
+    )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_data[chat_id] = {"step": None}   # ждём выбора в меню
     await update.message.reply_text(
-        WELCOME_TEXT,
-        reply_markup=MAIN_MENU
+        get_welcome_text(),
+        reply_markup=build_main_menu()
     )
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -409,7 +424,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
         chat_id=chat_id,
         text="Чем ещё могу помочь?",
-        reply_markup=MAIN_MENU
+        reply_markup=build_main_menu()
     )
 
 # ─── Обработчики кнопок главного меню ───────────────────────────
@@ -451,7 +466,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Хотите точный расчёт под ваши даты?",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🚗 Оформить заявку", callback_data="menu_apply")],
-                [InlineKeyboardButton("📞 Написать менеджеру", url="https://t.me/fake_smm")],
+                [InlineKeyboardButton("📞 Написать менеджеру", url=get_manager_url())],
             ])
         )
 
@@ -461,7 +476,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             FAQ_TEXT,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🚗 Оставить заявку", callback_data="menu_apply")],
-                [InlineKeyboardButton("📞 Спросить менеджера", url="https://t.me/fake_smm")],
+                [InlineKeyboardButton("📞 Спросить менеджера", url=get_manager_url())],
             ])
         )
 
@@ -470,7 +485,7 @@ async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data[chat_id] = {"step": None}
     await update.message.reply_text(
         "Хорошо, начнём сначала! 😊\n\nЧем могу помочь?",
-        reply_markup=MAIN_MENU
+        reply_markup=build_main_menu()
     )
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -703,13 +718,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 name=f"remind_{chat_id}",
             )
 
-            prices = PRICES[city_key]
             await update.message.reply_text(
                 f"✅ Город: {city_display}\n\n"
-                f"💰 Ориентировочные цены:\n"
-                f"Эконом от €{prices['эконом']}/сутки · "
-                f"Комфорт от €{prices['комфорт']}/сутки · "
-                f"SUV от €{prices['suv']}/сутки\n\n"
                 "Шаг 2 из 4 — на какой срок нужен автомобиль?",
                 reply_markup=DATES_KEYBOARD
             )
@@ -779,10 +789,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif step == STEP_NAME:
             ud["name"] = text
             ud["step"] = STEP_PHONE
+            manager_handle = f"@{ADMIN_USERNAME}" if ADMIN_USERNAME else "@weonerent"
             await update.message.reply_text(
                 "Отлично! Последний шаг — номер телефона.\n\n"
                 "Нажмите кнопку ниже или введите вручную с кодом страны.\n"
-                "Например: +34 612 345 678",
+                "Например: +34 612 345 678\n\n"
+                f"💬 Или напишите менеджеру напрямую {manager_handle} — он поможет без формы.",
                 reply_markup=PHONE_KEYBOARD
             )
         elif step == STEP_PHONE:
@@ -808,6 +820,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
 
+            if is_working_hours():
+                response_note = "Менеджер свяжется с вами в течение 5 минут."
+            else:
+                response_note = "Менеджер ответит по возможности — сейчас нерабочее время (9:00–20:00 МСК)."
+
             summary = (
                 "🎉 Заявка оформлена!\n\n"
                 "Вот что мы передали менеджеру:\n"
@@ -819,8 +836,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📞 Телефон: {phone}"
                 f"{price_line}\n"
                 "─────────────────────\n\n"
-                "Менеджер свяжется с вами в течение 5 минут "
-                "в рабочее время и уточнит все детали. "
+                f"{response_note} "
                 "Если что-то изменится — просто напишите ему напрямую."
             )
             await update.message.reply_text(summary, reply_markup=REMOVE)
@@ -840,7 +856,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_data[chat_id] = {"step": None}
             await update.message.reply_text(
                 "Ваша заявка уже принята 👍\n\nЧем ещё могу помочь?",
-                reply_markup=MAIN_MENU
+                reply_markup=build_main_menu()
             )
     except Exception as e:
         logger.error(f"Ошибка: {e}")
@@ -931,13 +947,26 @@ async def remind_abandoned(context: ContextTypes.DEFAULT_TYPE):
     step = ud.get("step")
     # Отправляем напоминание только если заявка не завершена
     if step not in (None, STEP_CITY, STEP_DONE):
+        city = ud.get("city", "")
+        city_part = f" в {city}" if city else ""
+        if is_working_hours():
+            timing_note = "⏱ Менеджер сейчас онлайн — ответит в течение 5 минут."
+        else:
+            timing_note = "🕘 Менеджер ответит в рабочее время (9:00–20:00 МСК)."
         try:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text="Вы начали оформлять заявку но не закончили.\n\n"
-                     "Продолжить — просто напишите следующий ответ.\n"
-                     "Начать заново — /start",
-                reply_markup=KEYBOARDS["soft"]
+                text=(
+                    f"👋 Вы начали оформлять заявку на аренду авто{city_part}, "
+                    f"но не завершили её.\n\n"
+                    f"{timing_note}\n\n"
+                    "Продолжить — просто напишите следующий ответ.\n"
+                    "Начать заново — /start"
+                ),
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🚗 Продолжить заявку", callback_data="menu_apply")],
+                    [InlineKeyboardButton("📞 Написать менеджеру", url=get_manager_url())],
+                ])
             )
         except Exception:
             pass
