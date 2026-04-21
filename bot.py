@@ -177,16 +177,9 @@ def calc_price(city_raw: str, car_raw: str, days: int):
         return None, None, None
     if car not in PRICES[city]:
         car = "эконом"
-    base   = PRICES[city][car]
-    # Скидка за длительность
-    if days >= 14:
-        disc, disc_pct = int(base * days * 0.15), 15
-    elif days >= 7:
-        disc, disc_pct = int(base * days * 0.10), 10
-    else:
-        disc, disc_pct = 0, 0
-    total = base * days - disc
-    return base, total, disc_pct
+    base  = PRICES[city][car]
+    total = base * days
+    return base, total
 
 # ─── Данные пользователей и ротация лайфхаков ───────────────────
 user_data = {}
@@ -347,7 +340,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⛵ Дения — от €22/сутки\n"
             "🌴 Марбелья — от €28/сутки\n\n"
             "Цены за сутки, от 3 дней.\n"
-            "Скидка 10% от 7 дней · 15% от 14 дней.\n\n"
+            "\n"
             "🛡 В аренду включена базовая страховка (гражданская ответственность).\n\n"
             "Дополнительные пакеты:\n"
             "• Стандарт — €20/сутки: колёса, стёкла + 1 бесплатный вызов эвакуатора\n"
@@ -504,23 +497,23 @@ async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Количество дней должно быть числом. Пример: /price Малага Эконом 5")
         return
 
-    base, total, disc_pct = calc_price(city_raw, car_raw, days)
-    if base is None:
+    result = calc_price(city_raw, car_raw, days)
+    if result[0] is None:
         await update.message.reply_text(
             f"Город «{city_raw}» не найден.\n\n"
             "Доступные: Барселона, Мадрид, Малага, Аликанте, Валенсия, Севилья, Торревьеха, Гандия, Дения, Марбелья"
         )
         return
 
+    base, total = result
     city_name = city_raw.capitalize()
     car_name  = car_raw.capitalize()
-    disc_text = f"\n💚 Скидка {disc_pct}% за длительность уже включена" if disc_pct else ""
 
     await update.message.reply_text(
         f"💰 Расчёт стоимости\n\n"
         f"📍 {city_name} · {car_name} · {days} дн.\n\n"
         f"Цена от: €{base}/сутки\n"
-        f"Итого: от €{total}{disc_text}\n\n"
+        f"Итого: от €{total}\n\n"
         f"Точная цена зависит от дат и наличия авто.\n"
         f"Оставьте заявку — менеджер пришлёт финальную стоимость.",
         reply_markup=KEYBOARDS["full"]
@@ -676,13 +669,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 city_key = ud.get("city_key", "")
                 car_key  = CAR_ALIASES.get(text.lower().strip(), text.lower().strip())
                 if 3 <= days <= 60 and city_key:
-                    base, total, disc_pct = calc_price(city_key, car_key, days)
+                    base, total = calc_price(city_key, car_key, days)
                     if total:
-                        disc_text = f" — скидка {disc_pct}% за длительность" if disc_pct else ""
-                        total_hint = (
-                            f"\n\n💰 Примерная стоимость: от €{total}"
-                            f" за {days} дней{disc_text}"
-                        )
+                        total_hint = f"\n\n💰 Примерная стоимость: от €{total} за {days} дней"
             except Exception:
                 pass
 
@@ -717,10 +706,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             car_key  = CAR_ALIASES.get(car.lower().strip(), car.lower().strip())
             if 3 <= days <= 60 and city_key:
                 try:
-                    _, total, disc_pct = calc_price(city_key, car_key, days)
+                    _, total = calc_price(city_key, car_key, days)
                     if total:
-                        disc_text = f" (скидка {disc_pct}%)" if disc_pct else ""
-                        price_line = f"\n💰 Ориентировочно: от €{total}{disc_text}"
+                        price_line = f"\n💰 Ориентировочно: от €{total}"
                 except Exception:
                     pass
 
