@@ -435,12 +435,29 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data == "menu_apply":
-        user_data[chat_id] = {"step": STEP_CITY}
-        await query.message.reply_text(
-            "Отлично, оформляем заявку! 🚗\n\n"
-            "Шаг 1 из 4 — выберите город:",
-            reply_markup=CITY_KEYBOARD
-        )
+        ud = user_data.get(chat_id, {})
+        current_step = ud.get("step")
+
+        # Если есть незавершённая заявка — продолжаем с текущего шага
+        if current_step not in (None, STEP_DONE) and current_step is not None:
+            step_prompts = {
+                STEP_CITY:         ("Продолжаем! Выберите город:", CITY_KEYBOARD),
+                STEP_DATES:        ("Продолжаем! На какой срок нужен автомобиль?", DATES_KEYBOARD),
+                STEP_DATES_DETAIL: ("Введите даты или срок аренды.\n\nНапример: с 10 по 17 июля  или  7 дней", REMOVE),
+                STEP_CAR:          ("Продолжаем! Выберите тип автомобиля:", CAR_KEYBOARD),
+                STEP_NAME:         ("Продолжаем! Как вас зовут?\n\nВведите имя и фамилию:", REMOVE),
+                STEP_PHONE:        ("Продолжаем! Отправьте номер телефона или введите вручную:", PHONE_KEYBOARD),
+            }
+            prompt, kb = step_prompts.get(current_step, ("Продолжаем заявку:", CITY_KEYBOARD))
+            await query.message.reply_text(prompt, reply_markup=kb)
+        else:
+            # Начинаем новую заявку
+            user_data[chat_id] = {"step": STEP_CITY}
+            await query.message.reply_text(
+                "Отлично, оформляем заявку! 🚗\n\n"
+                "Шаг 1 из 4 — выберите город:",
+                reply_markup=CITY_KEYBOARD
+            )
 
     elif data == "menu_price":
         user_data[chat_id] = {"step": None}
@@ -747,7 +764,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ud["step"] = STEP_CAR
             await update.message.reply_text(
                 f"✅ Срок: {ud['dates']}\n\n"
-                "Шаг 3 из 4 — выберите тип автомобиля:",
+                "Шаг 3 из 4 — выберите тип автомобиля:\n\n"
+                "🟢 Эконом — Seat Ibiza, VW Polo · 4–5 мест · компактный\n"
+                "🔵 Комфорт — Seat Leon, Skoda Octavia · 5 мест · просторный\n"
+                "🔴 SUV — Seat Ateca, Kia Sportage · 5 мест · высокий клиренс",
                 reply_markup=CAR_KEYBOARD
             )
 
@@ -762,7 +782,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await update.message.reply_text(
                 f"✅ Даты: {text} ({days_text})\n\n"
-                "Шаг 3 из 4 — выберите тип автомобиля:",
+                "Шаг 3 из 4 — выберите тип автомобиля:\n\n"
+                "🟢 Эконом — Seat Ibiza, VW Polo · 4–5 мест · компактный\n"
+                "🔵 Комфорт — Seat Leon, Skoda Octavia · 5 мест · просторный\n"
+                "🔴 SUV — Seat Ateca, Kia Sportage · 5 мест · высокий клиренс",
                 reply_markup=CAR_KEYBOARD
             )
         elif step == STEP_CAR:
@@ -836,20 +859,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📞 Телефон: {phone}"
                 f"{price_line}\n"
                 "─────────────────────\n\n"
-                f"{response_note} "
-                "Если что-то изменится — просто напишите ему напрямую."
+                f"{response_note}\n\n"
+                "Пока ждёте — подпишитесь на канал 👇 Там маршруты по Испании, "
+                "лайфхаки об аренде авто и актуальные цены."
             )
-            await update.message.reply_text(summary, reply_markup=REMOVE)
             track_lead(city)
             await send_lead(update, context, chat_id, ud)
-
-            # Предлагаем канал с пояснением зачем
-            await update.message.reply_text(
-                "Пока ждёте ответа — подпишитесь на наш канал 👇\n\n"
-                "Там маршруты по Испании, лайфхаки об аренде авто "
-                "и актуальные цены каждую неделю.",
-                reply_markup=SUBSCRIBE_KEYBOARD
-            )
+            await update.message.reply_text(summary, reply_markup=SUBSCRIBE_KEYBOARD)
 
         elif step == STEP_DONE:
             # После завершения заявки — возвращаем в меню
