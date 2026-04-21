@@ -33,14 +33,32 @@ STEP_CITY  = 0
 STEP_DATES = 1
 STEP_CAR   = 2
 STEP_NAME  = 3
-STEP_PHONE = 4
-STEP_DONE  = 5
+STEP_PHONE        = 4
+STEP_DONE         = 5
+STEP_DATES_DETAIL = "dates_detail"   # ввод точных дат текстом
 
 # Шаги ручной публикации
 STEP_POST_TEXT    = "post_text"
 STEP_POST_BUTTONS = "post_buttons"
 
 # ─── Клавиатуры для заявки ──────────────────────────────────────
+DATES_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        ["📅 3–4 дня",    "📅 5–7 дней"],
+        ["📅 1–2 недели", "📅 Больше 2 недель"],
+        ["✏️ Указать точные даты"],
+    ],
+    resize_keyboard=True, one_time_keyboard=True
+)
+
+# Маппинг кнопок → примерное кол-во дней для расчёта цены
+DATES_BUTTON_MAP = {
+    "📅 3–4 дня":         3,
+    "📅 5–7 дней":        5,
+    "📅 1–2 недели":     10,
+    "📅 Больше 2 недель": 16,
+}
+
 CITY_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["🏙 Барселона",  "🏛 Мадрид"],
@@ -597,60 +615,89 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Эконом от €{prices['эконом']}/сутки · "
                 f"Комфорт от €{prices['комфорт']}/сутки · "
                 f"SUV от €{prices['suv']}/сутки\n\n"
-                "Шаг 2 из 4 — на какой срок нужен автомобиль?\n\n"
-                "Укажите даты или количество дней.\n"
-                "Например: с 10 по 17 июля  или  7 дней",
-                reply_markup=REMOVE
+                "Шаг 2 из 4 — на какой срок нужен автомобиль?",
+                reply_markup=DATES_KEYBOARD
             )
         elif step == STEP_DATES:
-            ud["dates"] = text
+            if text == "✏️ Указать точные даты":
+                # Пользователь хочет ввести даты вручную
+                ud["step"] = STEP_DATES_DETAIL
+                await update.message.reply_text(
+                    "Введите даты или срок аренды.\n\n"
+                    "Например: с 10 по 17 июля  или  7 дней",
+                    reply_markup=REMOVE
+                )
+                return
+
+            # Кнопка с диапазоном дней
+            days_estimate = DATES_BUTTON_MAP.get(text)
+            if days_estimate:
+                ud["dates"]         = text.replace("📅 ", "")
+                ud["days_estimate"] = days_estimate
+            else:
+                # Свободный ввод (на случай если обошли клавиатуру)
+                ud["dates"] = text
+                ud["days_estimate"] = 0
+
             ud["step"] = STEP_CAR
             await update.message.reply_text(
-                "Какой тип автомобиля вам нужен?",
+                f"✅ Срок: {ud['dates']}\n\n"
+                "Шаг 3 из 4 — выберите тип автомобиля:",
+                reply_markup=CAR_KEYBOARD
+            )
+
+        elif step == STEP_DATES_DETAIL:
+            # Ввод точных дат текстом
+            ud["dates"] = text
+            import re
+            nums = re.findall(r"\d+", text)
+            if len(nums) >= 2:
+                days_estimate = abs(int(nums[1]) - int(nums[0]))
+                if days_estimate == 0:
+                    days_estimate = int(nums[-1])
+            elif len(nums) == 1:
+                days_estimate = int(nums[0])
+            else:
+                days_estimate = 0
+            ud["days_estimate"] = max(0, min(days_estimate, 60))
+            ud["step"] = STEP_CAR
+            await update.message.reply_text(
+                f"✅ Даты: {text}\n\n"
+                "Шаг 3 из 4 — выберите тип автомобиля:",
                 reply_markup=CAR_KEYBOARD
             )
         elif step == STEP_CAR:
             ud["car"] = text
             ud["step"] = STEP_NAME
-            # Считаем примерную сумму если знаем даты
+            # Считаем примерную стоимость из сохранённого days_estimate
             total_hint = ""
             try:
-                dates_raw = ud.get("dates", "")
-                # Пробуем найти число дней из фраз "5 дней", "с 1 по 7" и т.п.
-                import re
-                nums = re.findall(r"\d+", dates_raw)
-                if len(nums) >= 2:
-                    days = abs(int(nums[1]) - int(nums[0]))
-                    if days == 0:
-                        days = int(nums[-1])
-                elif len(nums) == 1:
-                    days = int(nums[0])
-                else:
-                    days = 0
-
-                if 3 <= days <= 60:
-                    city_key = ud.get("city_key", ud.get("city", "").lower().strip())
-                    car_key  = text.lower().strip()
-                    car_key  = CAR_ALIASES.get(car_key, car_key)
+                days     = ud.get("days_estimate", 0)
+                city_key = ud.get("city_key", "")
+                car_key  = CAR_ALIASES.get(text.lower().strip(), text.lower().strip())
+                if 3 <= days <= 60 and city_key:
                     base, total, disc_pct = calc_price(city_key, car_key, days)
                     if total:
-                        disc_text = f" (скидка {disc_pct}% за длительность)" if disc_pct else ""
+                        disc_text = f" — скидка {disc_pct}% за длительность" if disc_pct else ""
                         total_hint = (
-                            f"\n\n💰 Примерная стоимость: от €{total} за {days} дней{disc_text}"
+                            f"\n\n💰 Примерная стоимость: от €{total}"
+                            f" за {days} дней{disc_text}"
                         )
             except Exception:
                 pass
 
             await update.message.reply_text(
-                f"Отлично.{total_hint}\n\nВаше имя и фамилия?",
+                f"✅ Автомобиль: {text}{total_hint}\n\n"
+                "Шаг 4 из 4 — как вас зовут?\n\nВведите имя и фамилию:",
                 reply_markup=REMOVE
             )
         elif step == STEP_NAME:
             ud["name"] = text
             ud["step"] = STEP_PHONE
             await update.message.reply_text(
-                "Ваш номер телефона с кодом страны.\n\n"
-                "Можете нажать кнопку ниже или написать вручную.",
+                "Отлично! Последний шаг — номер телефона.\n\n"
+                "Нажмите кнопку ниже или введите вручную с кодом страны.\n"
+                "Например: +34 612 345 678",
                 reply_markup=PHONE_KEYBOARD
             )
         elif step == STEP_PHONE:
