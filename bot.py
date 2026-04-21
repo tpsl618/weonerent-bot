@@ -23,8 +23,15 @@ CHANNEL_ID        = os.environ.get("CHANNEL_ID", "@weonerent")
 DISCUSSION_GROUP  = os.environ.get("DISCUSSION_GROUP", "")   # ID группы обсуждения
 ADMIN_USERNAME    = os.environ.get("ADMIN_USERNAME", "")   # Telegram username без @
 
+MANAGER_FALLBACK = "fake_smm"   # дефолт если ADMIN_USERNAME не задан в env
+
 def get_manager_url() -> str:
-    return f"https://t.me/{ADMIN_USERNAME}" if ADMIN_USERNAME else "https://t.me/weonerent"
+    username = ADMIN_USERNAME or MANAGER_FALLBACK
+    return f"https://t.me/{username}"
+
+def get_manager_handle() -> str:
+    username = ADMIN_USERNAME or MANAGER_FALLBACK
+    return f"@{username}"
 
 TZ = pytz.timezone("Europe/Madrid")
 
@@ -400,12 +407,12 @@ def schedule_all_posts(app):
 # ─── Команды ────────────────────────────────────────────────────
 def get_welcome_text() -> str:
     if is_working_hours():
-        timing = "Менеджер ответит в течение 5 минут."
+        timing = "На связи, отвечу быстро 🙌"
     else:
-        timing = "Сейчас нерабочее время (9:00–20:00 по Мадриду) — менеджер ответит по возможности."
+        timing = "Сейчас не рабочее время, но напишите — отвечу как только появлюсь онлайн."
     return (
-        "Привет! 👋 Помогу подобрать и забронировать авто в Испании.\n\n"
-        f"{timing}\n\n"
+        f"Привет! Меня зовут Алекс, я менеджер WeOneRent 👋\n\n"
+        f"Помогу подобрать авто в Испании и оформить всё за пару минут. {timing}\n\n"
         "Чем могу помочь?"
     )
 
@@ -454,8 +461,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Начинаем новую заявку
             user_data[chat_id] = {"step": STEP_CITY}
             await query.message.reply_text(
-                "Отлично, оформляем заявку! 🚗\n\n"
-                "Шаг 1 из 4 — выберите город:",
+                "Отлично, оформляем! 🚗\n\nВ каком городе нужен автомобиль?",
                 reply_markup=CITY_KEYBOARD
             )
 
@@ -736,8 +742,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
             await update.message.reply_text(
-                f"✅ Город: {city_display}\n\n"
-                "Шаг 2 из 4 — на какой срок нужен автомобиль?",
+                f"✅ Город: {city_display}\n\nНа какой срок нужен автомобиль?",
                 reply_markup=DATES_KEYBOARD
             )
         elif step == STEP_DATES:
@@ -763,8 +768,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             ud["step"] = STEP_CAR
             await update.message.reply_text(
-                f"✅ Срок: {ud['dates']}\n\n"
-                "Шаг 3 из 4 — выберите тип автомобиля:\n\n"
+                f"✅ Срок: {ud['dates']}\n\nКакой тип автомобиля?\n\n"
                 "🟢 Эконом — Seat Ibiza, VW Polo · 4–5 мест · компактный\n"
                 "🔵 Комфорт — Seat Leon, Skoda Octavia · 5 мест · просторный\n"
                 "🔴 SUV — Seat Ateca, Kia Sportage · 5 мест · высокий клиренс",
@@ -781,8 +785,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             days_text = f"{days} дней" if days else "уточним с менеджером"
 
             await update.message.reply_text(
-                f"✅ Даты: {text} ({days_text})\n\n"
-                "Шаг 3 из 4 — выберите тип автомобиля:\n\n"
+                f"✅ Даты: {text} ({days_text})\n\nКакой тип автомобиля?\n\n"
                 "🟢 Эконом — Seat Ibiza, VW Polo · 4–5 мест · компактный\n"
                 "🔵 Комфорт — Seat Leon, Skoda Octavia · 5 мест · просторный\n"
                 "🔴 SUV — Seat Ateca, Kia Sportage · 5 мест · высокий клиренс",
@@ -805,19 +808,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
 
             await update.message.reply_text(
-                f"✅ Автомобиль: {text}{total_hint}\n\n"
-                "Шаг 4 из 4 — как вас зовут?\n\nВведите имя и фамилию:",
+                f"✅ Автомобиль: {text}{total_hint}\n\nКак вас зовут? Введите имя и фамилию:",
                 reply_markup=REMOVE
             )
         elif step == STEP_NAME:
             ud["name"] = text
             ud["step"] = STEP_PHONE
-            manager_handle = f"@{ADMIN_USERNAME}" if ADMIN_USERNAME else "@weonerent"
             await update.message.reply_text(
-                "Отлично! Последний шаг — номер телефона.\n\n"
-                "Нажмите кнопку ниже или введите вручную с кодом страны.\n"
-                "Например: +34 612 345 678\n\n"
-                f"💬 Или напишите менеджеру напрямую {manager_handle} — он поможет без формы.",
+                "Отлично! Осталось только оставить номер телефона.\n\n"
+                "Нажмите кнопку или введите вручную с кодом страны — например: +34 612 345 678\n\n"
+                f"💬 Или напишите мне напрямую {get_manager_handle()} — разберёмся без формы.",
                 reply_markup=PHONE_KEYBOARD
             )
         elif step == STEP_PHONE:
@@ -877,7 +877,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка: {e}")
         await update.message.reply_text(
-            "Технический сбой. Напишите нам напрямую: @weonerent",
+            f"Технический сбой. Напишите мне напрямую: {get_manager_handle()}",
             reply_markup=REMOVE
         )
 
