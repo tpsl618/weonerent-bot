@@ -3,7 +3,7 @@ import json
 import base64
 import logging
 import pytz
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import (
     Update,
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
@@ -232,7 +232,7 @@ def get_sheets_stats_this_week() -> dict:
         # Начало текущей недели (понедельник 00:00)
         week_start = now.replace(
             hour=0, minute=0, second=0, microsecond=0
-        ) - __import__('datetime').timedelta(days=now.weekday())
+        ) - timedelta(days=now.weekday())
         for row in rows[1:]:   # пропускаем заголовок
             if len(row) < 4:
                 continue
@@ -661,6 +661,75 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_data[chat_id] = {"step": STEP_CITY}
     await update.message.reply_text("Отменено.", reply_markup=REMOVE)
+
+async def sheetstest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Диагностика подключения к Google Sheets — только для админа."""
+    if not is_admin(update):
+        return
+
+    lines = ["🔍 Диагностика Google Sheets\n"]
+
+    # 1. Переменные окружения
+    lines.append(f"GOOGLE_SHEET_ID:  {'✅ задан' if GOOGLE_SHEET_ID else '❌ не задан'}")
+    lines.append(f"GOOGLE_CREDS_B64: {'✅ задан' if GOOGLE_CREDS_B64 else '❌ не задан'}\n")
+
+    if not GOOGLE_SHEET_ID or not GOOGLE_CREDS_B64:
+        lines.append("⛔ Добавь переменные в Railway и передеплой.")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    # 2. Декодирование base64
+    try:
+        creds_json = json.loads(base64.b64decode(GOOGLE_CREDS_B64))
+        lines.append(f"✅ base64 декодирован")
+        lines.append(f"✅ Сервис-аккаунт: {creds_json.get('client_email', '?')}\n")
+    except Exception as e:
+        lines.append(f"❌ Ошибка декодирования base64: {e}")
+        lines.append("\nПроверь что скопировал строку целиком без пробелов и переносов.")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    # 3. Авторизация в Google
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
+        client = gspread.authorize(creds)
+        lines.append("✅ Авторизация в Google — OK\n")
+    except Exception as e:
+        lines.append(f"❌ Ошибка авторизации: {e}")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    # 4. Открытие таблицы
+    try:
+        sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
+        lines.append(f"✅ Таблица открыта: «{sheet.spreadsheet.title}»")
+        lines.append(f"   Лист: «{sheet.title}», строк: {sheet.row_count}\n")
+    except Exception as e:
+        lines.append(f"❌ Не удалось открыть таблицу: {e}")
+        lines.append("\nПроверь:")
+        lines.append("• Правильный ли GOOGLE_SHEET_ID?")
+        lines.append(f"• Поделился ли таблицей с {creds_json.get('client_email', 'сервис-аккаунтом')}?")
+        await update.message.reply_text("\n".join(lines))
+        return
+
+    # 5. Тестовая запись
+    try:
+        _ensure_headers(sheet)
+        test_row = [
+            datetime.now(TZ).strftime("%d.%m.%Y %H:%M"),
+            "TEST", "TEST", "Тест", "1 день",
+            "Эконом", "—", "@admin_test", "0", "Тест"
+        ]
+        sheet.append_row(test_row, value_input_option="USER_ENTERED")
+        lines.append("✅ Тестовая строка записана в таблицу!")
+        lines.append("\n🎉 Всё работает. Можешь удалить тестовую строку из таблицы.")
+    except Exception as e:
+        lines.append(f"❌ Ошибка записи: {e}")
+
+    await update.message.reply_text("\n".join(lines))
 
 FAQ_TEXT = (
     "ℹ️ Всё о сервисе WeOneRent\n\n"
@@ -1152,9 +1221,10 @@ def main():
     app.add_handler(CommandHandler("admin",   admin_cmd))
     app.add_handler(CommandHandler("post",    post_cmd))
     app.add_handler(CommandHandler("status",  status_cmd))
-    app.add_handler(CommandHandler("cancel",  cancel_cmd))
-    app.add_handler(CommandHandler("price",   price_cmd))
-    app.add_handler(CommandHandler("faq",     faq_cmd))
+    app.add_handler(CommandHandler("cancel",     cancel_cmd))
+    app.add_handler(CommandHandler("price",      price_cmd))
+    app.add_handler(CommandHandler("faq",        faq_cmd))
+    app.add_handler(CommandHandler("sheetstest", sheetstest_cmd))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
     app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.CONTACT, handle_message))
