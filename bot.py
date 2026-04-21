@@ -184,6 +184,109 @@ def calc_price(city_raw: str, car_raw: str, days: int):
 user_data = {}
 lifehack_cycle = cycle(LIFEHACKS)   # бесконечная ротация
 
+# ─── Парсер дат → количество дней ──────────────────────────────
+import re as _re
+from datetime import date as _date
+
+_MONTHS = {
+    'янв': 1, 'фев': 2, 'мар': 3, 'апр': 4,
+    'май': 5, 'мая': 5, 'июн': 6, 'июл': 7,
+    'авг': 8, 'сен': 9, 'окт': 10, 'ноя': 11, 'дек': 12,
+}
+
+def parse_days(text: str) -> int:
+    """
+    Вычисляет количество дней из произвольного текста.
+    Поддерживает форматы:
+      - "7 дней / 7 дня / 7 суток"
+      - "неделя / две недели / месяц"
+      - "с 10 по 17 июля"            → 7
+      - "10.06 – 11.07"              → 31
+      - "10/06 - 11/07"              → 31
+      - "10 06 11 07"                → 31
+      - "10 июня – 11 июля"          → 31
+      - "с 10.06.2026 по 11.07.2026" → 31
+    """
+    t = text.lower().strip()
+
+    # Слова-ключи
+    if _re.search(r'полмесяц|пол\s*месяц', t):
+        return 15
+    if _re.search(r'дв[ае]\s*недел|2\s*недел', t):
+        return 14
+    if _re.search(r'\bнедел', t):
+        return 7
+    if _re.search(r'\bмесяц', t):
+        return 30
+
+    # "N дней / дня / суток / ночей"
+    m = _re.search(r'(\d+)\s*(?:дней|дня|день|суток|ноч\w+)', t)
+    if m:
+        return int(m.group(1))
+
+    # Пробуем найти две даты вида DD.MM или DD/MM или DD-MM или DD MM
+    # Разделители: . / – -  (пробел не используем — съедает соседнюю дату)
+    dp = r'(\d{1,2})[./\-](\d{1,2})(?:[./\-]\d{4})?'
+    pairs = _re.findall(dp, t)
+    if len(pairs) >= 2:
+        d1, mo1 = int(pairs[0][0]), int(pairs[0][1])
+        d2, mo2 = int(pairs[1][0]), int(pairs[1][1])
+        if (1 <= d1 <= 31 and 1 <= mo1 <= 12 and
+                1 <= d2 <= 31 and 1 <= mo2 <= 12):
+            try:
+                yr = datetime.now(MSK).year
+                dt1 = _date(yr, mo1, d1)
+                dt2 = _date(yr, mo2, d2)
+                if dt2 <= dt1:          # переход через новый год
+                    dt2 = _date(yr + 1, mo2, d2)
+                diff = (dt2 - dt1).days
+                if 1 <= diff <= 365:
+                    return diff
+            except ValueError:
+                pass
+
+    # Названия месяцев: "10 июня – 11 июля"
+    mon_pat = r'(\d{1,2})\s*(' + '|'.join(_MONTHS) + r')\w*'
+    named = _re.findall(mon_pat, t)
+    if len(named) >= 2:
+        d1, mk1 = int(named[0][0]), named[0][1]
+        d2, mk2 = int(named[1][0]), named[1][1]
+        mo1, mo2 = _MONTHS.get(mk1), _MONTHS.get(mk2)
+        if mo1 and mo2:
+            try:
+                yr = datetime.now(MSK).year
+                dt1 = _date(yr, mo1, d1)
+                dt2 = _date(yr, mo2, d2)
+                if dt2 <= dt1:
+                    dt2 = _date(yr + 1, mo2, d2)
+                diff = (dt2 - dt1).days
+                if 1 <= diff <= 365:
+                    return diff
+            except ValueError:
+                pass
+
+    # Четыре числа подряд = DD MM DD MM (голосовой/нестандартный ввод)
+    nums = _re.findall(r'\d+', t)
+    if len(nums) == 4:
+        d1, mo1, d2, mo2 = (int(x) for x in nums)
+        if 1<=d1<=31 and 1<=mo1<=12 and 1<=d2<=31 and 1<=mo2<=12:
+            try:
+                yr = datetime.now(MSK).year
+                dt1 = _date(yr, mo1, d1)
+                dt2 = _date(yr, mo2, d2)
+                if dt2 <= dt1: dt2 = _date(yr+1, mo2, d2)
+                diff = (dt2 - dt1).days
+                if 1 <= diff <= 365: return diff
+            except ValueError: pass
+
+    # Два числа — диапазон внутри одного месяца: "с 10 по 17"
+    if len(nums) == 2:
+        a, b = int(nums[0]), int(nums[1])
+        if 1 <= a <= 31 and 1 <= b <= 31 and b > a:
+            return b - a
+
+    return 0
+
 def get_user(chat_id):
     if chat_id not in user_data:
         user_data[chat_id] = {"step": STEP_CITY}
@@ -639,22 +742,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         elif step == STEP_DATES_DETAIL:
-            # Ввод точных дат текстом
-            ud["dates"] = text
-            import re
-            nums = re.findall(r"\d+", text)
-            if len(nums) >= 2:
-                days_estimate = abs(int(nums[1]) - int(nums[0]))
-                if days_estimate == 0:
-                    days_estimate = int(nums[-1])
-            elif len(nums) == 1:
-                days_estimate = int(nums[0])
-            else:
-                days_estimate = 0
-            ud["days_estimate"] = max(0, min(days_estimate, 60))
-            ud["step"] = STEP_CAR
+            # Ввод точных дат текстом — используем умный парсер
+            ud["dates"]        = text
+            ud["days_estimate"] = parse_days(text)
+            ud["step"]         = STEP_CAR
+
+            days = ud["days_estimate"]
+            days_text = f"{days} дней" if days else "уточним с менеджером"
+
             await update.message.reply_text(
-                f"✅ Даты: {text}\n\n"
+                f"✅ Даты: {text} ({days_text})\n\n"
                 "Шаг 3 из 4 — выберите тип автомобиля:",
                 reply_markup=CAR_KEYBOARD
             )
