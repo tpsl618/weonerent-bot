@@ -1,7 +1,7 @@
 import os
 import logging
 import requests
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
     filters, ContextTypes
@@ -33,6 +33,10 @@ PHONE_KEYBOARD = ReplyKeyboardMarkup(
 )
 REMOVE = ReplyKeyboardRemove()
 
+CHANNEL_KEYBOARD = InlineKeyboardMarkup([
+    [InlineKeyboardButton("Подписаться на канал", url="https://t.me/weonerent")]
+])
+
 user_data = {}
 
 def get_user(chat_id):
@@ -48,6 +52,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Отвечайте коротко — оформим заявку за пару минут.\n\n"
         "В каком городе нужен автомобиль?",
         reply_markup=REMOVE
+    )
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="Пока оформляем заявку — подписывайтесь на наш канал. Там лайфхаки, маршруты и актуальные цены.",
+        reply_markup=CHANNEL_KEYBOARD
     )
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -127,6 +136,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await update.message.reply_text(summary, reply_markup=REMOVE)
             await send_lead(update, context, chat_id, ud)
+            await update.message.reply_text(
+                "В нашем канале — лайфхаки про аренду авто, маршруты по Испании и актуальные цены.",
+                reply_markup=CHANNEL_KEYBOARD
+            )
 
         elif step == STEP_DONE:
             await update.message.reply_text(
