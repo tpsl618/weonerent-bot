@@ -21,7 +21,7 @@ GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
 OWNER_CHAT_ID  = int(os.environ.get("OWNER_CHAT_ID", "448609289"))
 CHANNEL_ID        = os.environ.get("CHANNEL_ID", "@weonerent")
 DISCUSSION_GROUP  = os.environ.get("DISCUSSION_GROUP", "")   # ID группы обсуждения
-ADMIN_USERNAME    = "fake_smm"
+ADMIN_USERNAME    = os.environ.get("ADMIN_USERNAME", "")   # Telegram username без @
 
 MSK = pytz.timezone("Europe/Moscow")
 
@@ -143,7 +143,13 @@ def get_user(chat_id):
     return user_data[chat_id]
 
 def is_admin(update: Update) -> bool:
-    return update.effective_user.username == ADMIN_USERNAME
+    user = update.effective_user
+    # Проверка по username (если задан) или по OWNER_CHAT_ID
+    if ADMIN_USERNAME and user.username == ADMIN_USERNAME:
+        return True
+    if update.effective_chat.id == OWNER_CHAT_ID:
+        return True
+    return False
 
 # ─── Автопостинг: callback для запланированного поста ───────────
 async def auto_publish(context: ContextTypes.DEFAULT_TYPE):
