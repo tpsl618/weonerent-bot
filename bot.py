@@ -9,7 +9,7 @@ from telegram import (
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    ChatMemberHandler, filters, ContextTypes
+    CallbackQueryHandler, ChatMemberHandler, filters, ContextTypes
 )
 from telegram.constants import ChatMemberStatus
 from datetime import time as dtime
@@ -55,6 +55,14 @@ REMOVE = ReplyKeyboardRemove()
 SUBSCRIBE_KEYBOARD = InlineKeyboardMarkup([
     [InlineKeyboardButton("📢 Наш канал", url="https://t.me/weonerent"),
      InlineKeyboardButton("🌐 Сайт", url="https://weonerent.es")]
+])
+
+# ─── Главное меню ────────────────────────────────────────────────
+MAIN_MENU = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🚗 Оставить заявку",     callback_data="menu_apply")],
+    [InlineKeyboardButton("💰 Узнать стоимость",    callback_data="menu_price"),
+     InlineKeyboardButton("❓ Частые вопросы",      callback_data="menu_faq")],
+    [InlineKeyboardButton("📞 Написать менеджеру",  url="https://t.me/weonerent")],
 ])
 
 KEYBOARDS = {
@@ -237,28 +245,91 @@ def schedule_all_posts(app):
     return count
 
 # ─── Команды ────────────────────────────────────────────────────
+WELCOME_TEXT = (
+    "Привет! 👋\n\n"
+    "Большое спасибо, что обратились к нам — это правда важно "
+    "и мы очень рады вас видеть! 🙌\n\n"
+    "Я — виртуальный помощник WeOneRent. Помогаю быстро и без лишних вопросов "
+    "подобрать автомобиль в Испании: Барселона, Мадрид, Малага, Тенерифе, "
+    "Аликанте, Валенсия, Севилья и Гран-Канария.\n\n"
+    "Никаких агрегаторов, никаких скрытых доплат — только живой менеджер "
+    "и честная цена. Ответим в течение 15 минут ⚡\n\n"
+    "Чем могу помочь?"
+)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    user_data[chat_id] = {"step": STEP_CITY}
+    user_data[chat_id] = {"step": None}   # ждём выбора в меню
     await update.message.reply_text(
-        "Добрый день! WeOneRent — аренда автомобилей в Испании.\n\n"
-        "Отвечайте коротко — оформим заявку за пару минут.\n\n"
-        "В каком городе нужен автомобиль?",
-        reply_markup=REMOVE
+        WELCOME_TEXT,
+        reply_markup=MAIN_MENU
     )
+
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Вспомогательная функция — показать главное меню (из любого места)"""
+    chat_id = update.effective_chat.id
+    user_data[chat_id] = {"step": None}
     await context.bot.send_message(
         chat_id=chat_id,
-        text="Пока оформляем заявку — подписывайтесь на канал. "
-             "Там лайфхаки, маршруты и актуальные цены.",
-        reply_markup=SUBSCRIBE_KEYBOARD
+        text="Чем ещё могу помочь?",
+        reply_markup=MAIN_MENU
     )
+
+# ─── Обработчики кнопок главного меню ───────────────────────────
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    chat_id = query.message.chat_id
+    data = query.data
+
+    if data == "menu_apply":
+        user_data[chat_id] = {"step": STEP_CITY}
+        await query.message.reply_text(
+            "Отлично, оформляем заявку! 🚗\n\n"
+            "Это займёт буквально пару минут.\n\n"
+            "В каком городе Испании вам нужен автомобиль?\n\n"
+            "Барселона · Мадрид · Малага · Тенерифе\n"
+            "Аликанте · Валенсия · Севилья · Гран-Канария",
+            reply_markup=REMOVE
+        )
+
+    elif data == "menu_price":
+        user_data[chat_id] = {"step": None}
+        await query.message.reply_text(
+            "💰 Ориентировочные цены на аренду авто:\n\n"
+            "🏙 Барселона — от €32/сутки\n"
+            "🏛 Мадрид — от €35/сутки\n"
+            "☀️ Малага — от €25/сутки\n"
+            "🌴 Аликанте — от €22/сутки\n"
+            "🏖 Валенсия — от €24/сутки\n"
+            "🎭 Севилья — от €26/сутки\n"
+            "🌋 Тенерифе — от €28/сутки\n"
+            "🏝 Гран-Канария — от €27/сутки\n\n"
+            "Цены за сутки, от 3 дней. Страховка включена.\n"
+            "Скидка 10% от 7 дней · 15% от 14 дней.\n\n"
+            "Хотите точный расчёт под ваши даты?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🚗 Оформить заявку", callback_data="menu_apply")],
+                [InlineKeyboardButton("📞 Написать менеджеру", url="https://t.me/weonerent")],
+            ])
+        )
+
+    elif data == "menu_faq":
+        user_data[chat_id] = {"step": None}
+        await query.message.reply_text(
+            FAQ_TEXT,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🚗 Оставить заявку", callback_data="menu_apply")],
+                [InlineKeyboardButton("📞 Спросить менеджера", url="https://t.me/weonerent")],
+            ])
+        )
 
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    user_data[chat_id] = {"step": STEP_CITY}
+    user_data[chat_id] = {"step": None}
     await update.message.reply_text(
-        "Начнём заново.\n\nВ каком городе нужен автомобиль?",
-        reply_markup=REMOVE
+        "Хорошо, начнём сначала! 😊\n\nЧем могу помочь?",
+        reply_markup=MAIN_MENU
     )
 
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -396,6 +467,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = update.message.text
 
     step = ud.get("step")
+
+    # ── Если пользователь ещё не выбрал действие — показываем меню ──
+    if step is None:
+        await update.message.reply_text(
+            "Выберите нужный пункт 👇",
+            reply_markup=MAIN_MENU
+        )
+        return
 
     # ── Ручной постинг ──
     if step == STEP_POST_TEXT and is_admin(update):
@@ -675,6 +754,7 @@ def main():
     app.add_handler(CommandHandler("cancel",  cancel_cmd))
     app.add_handler(CommandHandler("price",   price_cmd))
     app.add_handler(CommandHandler("faq",     faq_cmd))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
     app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.CONTACT, handle_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
