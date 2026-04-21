@@ -1,6 +1,7 @@
 import os
 import logging
-import requests
+import pytz
+from datetime import datetime
 from telegram import (
     Update,
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
@@ -11,16 +12,16 @@ from telegram.ext import (
     filters, ContextTypes
 )
 
-BOT_TOKEN     = os.environ["BOT_TOKEN"]
-GROQ_API_KEY  = os.environ["GROQ_API_KEY"]
-OWNER_CHAT_ID = int(os.environ.get("OWNER_CHAT_ID", "448609289"))
-CHANNEL_ID    = os.environ.get("CHANNEL_ID", "@weonerent")
+BOT_TOKEN      = os.environ["BOT_TOKEN"]
+GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
+OWNER_CHAT_ID  = int(os.environ.get("OWNER_CHAT_ID", "448609289"))
+CHANNEL_ID     = os.environ.get("CHANNEL_ID", "@weonerent")
 ADMIN_USERNAME = "fake_smm"
+
+MSK = pytz.timezone("Europe/Moscow")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # ─── Шаги заявки ────────────────────────────────────────────────
 STEP_CITY  = 0
@@ -30,9 +31,12 @@ STEP_NAME  = 3
 STEP_PHONE = 4
 STEP_DONE  = 5
 
-# Шаги режима постинга (для админа)
-STEP_POST_TEXT    = "post_text"
-STEP_POST_BUTTONS = "post_buttons"
+# Шаги режима публикации (для админа)
+STEP_POST_TEXT        = "post_text"
+STEP_POST_BUTTONS     = "post_buttons"
+STEP_SCHEDULE_WHEN    = "schedule_when"
+STEP_SCHEDULE_TEXT    = "schedule_text"
+STEP_SCHEDULE_BUTTONS = "schedule_buttons"
 
 # ─── Клавиатуры для заявки ──────────────────────────────────────
 CAR_KEYBOARD = ReplyKeyboardMarkup(
@@ -46,36 +50,25 @@ PHONE_KEYBOARD = ReplyKeyboardMarkup(
 REMOVE = ReplyKeyboardRemove()
 
 # ─── Inline кнопки ──────────────────────────────────────────────
-
-# Кнопка подписки (показывается пользователям бота)
 SUBSCRIBE_KEYBOARD = InlineKeyboardMarkup([
     [InlineKeyboardButton("📢 Наш канал", url="https://t.me/weonerent"),
      InlineKeyboardButton("🌐 Сайт", url="https://weonerent.es")]
 ])
 
-# Кнопки под постами в канале — основной CTA
 POST_KEYBOARD_FULL = InlineKeyboardMarkup([
     [InlineKeyboardButton("✈️ Оставить заявку", url="https://t.me/weonerent_ai_bot")],
     [InlineKeyboardButton("🌐 Наш сайт", url="https://weonerent.es")]
 ])
 
-# Кнопки под лайфхаком / информационным постом — мягкий CTA
 POST_KEYBOARD_SOFT = InlineKeyboardMarkup([
     [InlineKeyboardButton("💬 Узнать стоимость", url="https://t.me/weonerent_ai_bot"),
      InlineKeyboardButton("🌐 Сайт", url="https://weonerent.es")]
 ])
 
-# Кнопки под акцией — жёсткий CTA
 POST_KEYBOARD_PROMO = InlineKeyboardMarkup([
     [InlineKeyboardButton("🔥 Забронировать сейчас", url="https://t.me/weonerent_ai_bot")],
     [InlineKeyboardButton("📋 Подробнее на сайте", url="https://weonerent.es")]
 ])
-
-# Выбор типа кнопок для админа
-BUTTON_TYPE_KEYBOARD = ReplyKeyboardMarkup(
-    [["📌 Стандарт", "💬 Мягкий CTA"], ["🔥 Акция", "❌ Без кнопок"]],
-    resize_keyboard=True, one_time_keyboard=True
-)
 
 BUTTON_MAP = {
     "📌 Стандарт":   POST_KEYBOARD_FULL,
@@ -84,8 +77,14 @@ BUTTON_MAP = {
     "❌ Без кнопок": None,
 }
 
+BUTTON_TYPE_KEYBOARD = ReplyKeyboardMarkup(
+    [["📌 Стандарт", "💬 Мягкий CTA"], ["🔥 Акция", "❌ Без кнопок"]],
+    resize_keyboard=True, one_time_keyboard=True
+)
+
 # ─── Данные пользователей ───────────────────────────────────────
 user_data = {}
+scheduled_jobs = {}   # name -> описание для /jobs
 
 def get_user(chat_id):
     if chat_id not in user_data:
@@ -95,8 +94,30 @@ def get_user(chat_id):
 def is_admin(update: Update) -> bool:
     return update.effective_user.username == ADMIN_USERNAME
 
-# ─── Команды ────────────────────────────────────────────────────
+# ─── Callback для запланированного поста ────────────────────────
+async def publish_scheduled(context: ContextTypes.DEFAULT_TYPE):
+    job  = context.job
+    data = job.data
+    try:
+        await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=data["text"],
+            reply_markup=data["keyboard"]
+        )
+        await context.bot.send_message(
+            chat_id=OWNER_CHAT_ID,
+            text=f"✅ Пост опубликован в {CHANNEL_ID}\n\n«{data['text'][:80]}…»"
+        )
+        scheduled_jobs.pop(job.name, None)
+        logger.info(f"Scheduled post published: {job.name}")
+    except Exception as e:
+        logger.error(f"Scheduled post error: {e}")
+        await context.bot.send_message(
+            chat_id=OWNER_CHAT_ID,
+            text=f"❌ Ошибка публикации запланированного поста: {e}"
+        )
 
+# ─── Команды ────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_data[chat_id] = {"step": STEP_CITY}
@@ -126,43 +147,58 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         OWNER_CHAT_ID = update.effective_chat.id
         await update.message.reply_text(
             f"✅ Готово. Chat ID: {OWNER_CHAT_ID}\n\n"
-            f"Команды:\n"
-            f"/post — опубликовать пост в канал\n"
-            f"/cancel — отменить режим постинга"
+            "Команды:\n"
+            "/post — опубликовать сейчас\n"
+            "/schedule — запланировать пост\n"
+            "/jobs — список запланированных постов\n"
+            "/cancel — выйти из режима публикации"
         )
     else:
         await update.message.reply_text("Нет доступа.")
 
 async def post_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Режим публикации поста в канал (только для админа)"""
-    if not is_admin(update):
-        await update.message.reply_text("Нет доступа.")
-        return
-
+    if not is_admin(update): return
     chat_id = update.effective_chat.id
     user_data[chat_id] = {"step": STEP_POST_TEXT}
     await update.message.reply_text(
-        "📝 Режим публикации в канал.\n\n"
-        "Отправь текст поста. Можно использовать эмодзи и переносы строк.\n\n"
-        "Для отмены — /cancel",
+        "📝 Публикация сейчас\n\n"
+        "Отправь текст поста.\n\n/cancel — отмена",
         reply_markup=REMOVE
     )
+
+async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update): return
+    chat_id = update.effective_chat.id
+    user_data[chat_id] = {"step": STEP_SCHEDULE_WHEN}
+    await update.message.reply_text(
+        "⏰ Планировщик\n\n"
+        "Укажи дату и время публикации (МСК):\n\n"
+        "Формат: ДД.ММ ЧЧ:ММ\n"
+        "Пример: 28.04 09:30\n\n"
+        "/cancel — отмена",
+        reply_markup=REMOVE
+    )
+
+async def jobs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update): return
+    if not scheduled_jobs:
+        await update.message.reply_text("Нет запланированных постов.")
+        return
+    lines = ["📅 Запланированные посты:\n"]
+    for name, info in scheduled_jobs.items():
+        lines.append(f"• {info['when_str']} МСК — «{info['preview']}»")
+    await update.message.reply_text("\n".join(lines))
 
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_data[chat_id] = {"step": STEP_CITY}
-    await update.message.reply_text(
-        "Отменено. Бот в обычном режиме.",
-        reply_markup=REMOVE
-    )
+    await update.message.reply_text("Отменено.", reply_markup=REMOVE)
 
 # ─── Обработка сообщений ────────────────────────────────────────
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     ud = get_user(chat_id)
 
-    # Получаем текст (обычный или контакт)
     if update.message.contact:
         phone = update.message.contact.phone_number
         text = f"+{phone}" if not phone.startswith("+") else phone
@@ -171,20 +207,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     step = ud.get("step")
 
-    # ── Режим постинга (только для админа) ──
+    # ── /post: ввод текста ──
     if step == STEP_POST_TEXT and is_admin(update):
         ud["post_text"] = text
         ud["step"] = STEP_POST_BUTTONS
         await update.message.reply_text(
-            "Выбери тип кнопок под постом:",
+            "Выбери тип кнопок:",
             reply_markup=BUTTON_TYPE_KEYBOARD
         )
         return
 
+    # ── /post: выбор кнопок → публикуем сразу ──
     if step == STEP_POST_BUTTONS and is_admin(update):
-        keyboard = BUTTON_MAP.get(text)
+        keyboard  = BUTTON_MAP.get(text)
         post_text = ud.get("post_text", "")
-
         try:
             await context.bot.send_message(
                 chat_id=CHANNEL_ID,
@@ -197,17 +233,75 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             await update.message.reply_text(
-                f"❌ Ошибка публикации: {e}\n\n"
-                f"Убедись что бот добавлен как администратор канала {CHANNEL_ID}",
+                f"❌ Ошибка: {e}\n\nУбедись что бот — администратор канала {CHANNEL_ID}",
                 reply_markup=REMOVE
             )
+        user_data[chat_id] = {"step": STEP_CITY}
+        return
 
+    # ── /schedule: ввод даты/времени ──
+    if step == STEP_SCHEDULE_WHEN and is_admin(update):
+        try:
+            year = datetime.now(MSK).year
+            when_naive = datetime.strptime(f"{text} {year}", "%d.%m %H:%M %Y")
+            when_msk   = MSK.localize(when_naive)
+            if when_msk <= datetime.now(MSK):
+                await update.message.reply_text(
+                    "❌ Время уже прошло. Укажи будущее время:"
+                )
+                return
+            ud["schedule_when"]     = when_msk
+            ud["schedule_when_str"] = text
+            ud["step"] = STEP_SCHEDULE_TEXT
+            await update.message.reply_text(
+                f"✅ Время: {text} МСК\n\nТеперь отправь текст поста:",
+                reply_markup=REMOVE
+            )
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Неверный формат. Пример: 28.04 09:30"
+            )
+        return
+
+    # ── /schedule: ввод текста ──
+    if step == STEP_SCHEDULE_TEXT and is_admin(update):
+        ud["schedule_text"] = text
+        ud["step"] = STEP_SCHEDULE_BUTTONS
+        await update.message.reply_text(
+            "Выбери тип кнопок:",
+            reply_markup=BUTTON_TYPE_KEYBOARD
+        )
+        return
+
+    # ── /schedule: выбор кнопок → создаём задачу ──
+    if step == STEP_SCHEDULE_BUTTONS and is_admin(update):
+        keyboard  = BUTTON_MAP.get(text)
+        post_text = ud.get("schedule_text", "")
+        when_msk  = ud.get("schedule_when")
+        when_str  = ud.get("schedule_when_str", "")
+
+        job_name = f"post_{when_str.replace(' ', '_').replace(':', '-')}"
+        context.job_queue.run_once(
+            publish_scheduled,
+            when=when_msk,
+            data={"text": post_text, "keyboard": keyboard},
+            name=job_name
+        )
+        scheduled_jobs[job_name] = {
+            "when_str": when_str,
+            "preview":  post_text[:50]
+        }
+        await update.message.reply_text(
+            f"✅ Пост запланирован на {when_str} МСК\n\n"
+            f"«{post_text[:80]}{'…' if len(post_text) > 80 else ''}»\n\n"
+            f"Список постов: /jobs",
+            reply_markup=REMOVE
+        )
         user_data[chat_id] = {"step": STEP_CITY}
         return
 
     # ── Обычная заявка ──
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
-
     try:
         if step == STEP_CITY:
             ud["city"] = text
@@ -247,7 +341,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif step == STEP_PHONE:
             ud["phone"] = text
             ud["step"] = STEP_DONE
-
             summary = (
                 "Заявка принята.\n\n"
                 f"Город: {ud.get('city', '—')}\n"
@@ -279,11 +372,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ─── Отправка лида ──────────────────────────────────────────────
-
 async def send_lead(update, context, client_chat_id, ud):
-    user = update.effective_user
+    user     = update.effective_user
     username = f"@{user.username}" if user.username else f"ID: {client_chat_id}"
-
     lead = (
         f"НОВАЯ ЗАЯВКА — WeOneRent\n"
         f"{'─' * 25}\n"
@@ -304,14 +395,15 @@ async def send_lead(update, context, client_chat_id, ud):
         logger.error(f"Ошибка отправки: {e}")
 
 # ─── Запуск ─────────────────────────────────────────────────────
-
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",  start))
-    app.add_handler(CommandHandler("reset",  reset))
-    app.add_handler(CommandHandler("admin",  admin_cmd))
-    app.add_handler(CommandHandler("post",   post_cmd))
-    app.add_handler(CommandHandler("cancel", cancel_cmd))
+    app.add_handler(CommandHandler("start",    start))
+    app.add_handler(CommandHandler("reset",    reset))
+    app.add_handler(CommandHandler("admin",    admin_cmd))
+    app.add_handler(CommandHandler("post",     post_cmd))
+    app.add_handler(CommandHandler("schedule", schedule_cmd))
+    app.add_handler(CommandHandler("jobs",     jobs_cmd))
+    app.add_handler(CommandHandler("cancel",   cancel_cmd))
     app.add_handler(MessageHandler(filters.CONTACT, handle_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен...")
