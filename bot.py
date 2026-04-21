@@ -81,6 +81,56 @@ BUTTON_MAP = {
     "❌ Без кнопок": None,
 }
 
+# ─── Калькулятор цен ────────────────────────────────────────────
+PRICES = {
+    "барселона":  {"эконом": 32, "комфорт": 45, "suv": 58, "минивэн": 65},
+    "малага":     {"эконом": 25, "комфорт": 38, "suv": 52, "минивэн": 60},
+    "аликанте":   {"эконом": 22, "комфорт": 35, "suv": 48, "минивэн": 58},
+    "тенерифе":   {"эконом": 28, "комфорт": 42, "suv": 55, "минивэн": 68},
+    "мадрид":     {"эконом": 35, "комфорт": 50, "suv": 65, "минивэн": 75},
+    "валенсия":   {"эконом": 24, "комфорт": 37, "suv": 50, "минивэн": 60},
+    "севилья":    {"эконом": 26, "комфорт": 39, "suv": 53, "минивэн": 62},
+    "гран-канария": {"эконом": 27, "комфорт": 40, "suv": 54, "минивэн": 65},
+}
+
+CITY_ALIASES = {
+    "bcn": "барселона", "barcelona": "барселона",
+    "malaga": "малага", "málaga": "малага",
+    "alicante": "аликанте", "alicant": "аликанте",
+    "tenerife": "тенерифе", "тф": "тенерифе",
+    "madrid": "мадрид", "мск": "мадрид",
+    "valencia": "валенсия",
+    "seville": "севилья", "sevilla": "севилья",
+    "gran canaria": "гран-канария", "гк": "гран-канария",
+}
+
+CAR_ALIASES = {
+    "econom": "эконом", "economy": "эконом", "small": "эконом",
+    "comfort": "комфорт", "medium": "комфорт",
+    "suv": "suv", "джип": "suv", "внедорожник": "suv",
+    "minivan": "минивэн", "van": "минивэн", "минивен": "минивэн",
+}
+
+def calc_price(city_raw: str, car_raw: str, days: int):
+    city = city_raw.lower().strip()
+    car  = car_raw.lower().strip()
+    city = CITY_ALIASES.get(city, city)
+    car  = CAR_ALIASES.get(car, car)
+    if city not in PRICES:
+        return None, None, None
+    if car not in PRICES[city]:
+        car = "эконом"
+    base   = PRICES[city][car]
+    # Скидка за длительность
+    if days >= 14:
+        disc, disc_pct = int(base * days * 0.15), 15
+    elif days >= 7:
+        disc, disc_pct = int(base * days * 0.10), 10
+    else:
+        disc, disc_pct = 0, 0
+    total = base * days - disc
+    return base, total, disc_pct
+
 # ─── Данные пользователей и ротация лайфхаков ───────────────────
 user_data = {}
 lifehack_cycle = cycle(LIFEHACKS)   # бесконечная ротация
@@ -248,6 +298,46 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data[chat_id] = {"step": STEP_CITY}
     await update.message.reply_text("Отменено.", reply_markup=REMOVE)
 
+async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Быстрый расчёт цены: /price Барселона SUV 7"""
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text(
+            "Формат: /price Город Класс Дней\n\n"
+            "Пример: /price Барселона SUV 7\n\n"
+            "Города: Барселона, Малага, Аликанте, Тенерифе, Мадрид, Валенсия, Севилья, Гран-Канария\n"
+            "Классы: Эконом, Комфорт, SUV, Минивэн"
+        )
+        return
+    city_raw, car_raw = args[0], args[1]
+    try:
+        days = int(args[2])
+    except ValueError:
+        await update.message.reply_text("Количество дней должно быть числом. Пример: /price Малага Эконом 5")
+        return
+
+    base, total, disc_pct = calc_price(city_raw, car_raw, days)
+    if base is None:
+        await update.message.reply_text(
+            f"Город «{city_raw}» не найден.\n\n"
+            "Доступные: Барселона, Малага, Аликанте, Тенерифе, Мадрид, Валенсия, Севилья, Гран-Канария"
+        )
+        return
+
+    city_name = city_raw.capitalize()
+    car_name  = car_raw.capitalize()
+    disc_text = f"\n💚 Скидка {disc_pct}% за длительность уже включена" if disc_pct else ""
+
+    await update.message.reply_text(
+        f"💰 Расчёт стоимости\n\n"
+        f"📍 {city_name} · {car_name} · {days} дн.\n\n"
+        f"Цена от: €{base}/сутки\n"
+        f"Итого: от €{total}{disc_text}\n\n"
+        f"Точная цена зависит от дат и наличия авто.\n"
+        f"Оставьте заявку — менеджер пришлёт финальную стоимость.",
+        reply_markup=KEYBOARDS["full"]
+    )
+
 # ─── Обработка сообщений ────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -297,6 +387,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if step == STEP_CITY:
             ud["city"] = text
             ud["step"] = STEP_DATES
+            # Планируем напоминание через 2 часа если не завершит
+            context.job_queue.run_once(
+                remind_abandoned,
+                when=60 * 60 * 2,
+                data={"chat_id": chat_id},
+                name=f"remind_{chat_id}",
+            )
             await update.message.reply_text(
                 "Минимальный срок аренды — 3 суток.\n\n"
                 "На какой срок хотите взять автомобиль?\n"
@@ -357,6 +454,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # ─── Отправка лида ──────────────────────────────────────────────
+async def remind_abandoned(context: ContextTypes.DEFAULT_TYPE):
+    """Напоминание если человек остановился на середине заявки"""
+    chat_id = context.job.data["chat_id"]
+    ud = user_data.get(chat_id, {})
+    step = ud.get("step")
+    # Отправляем напоминание только если заявка не завершена
+    if step not in (None, STEP_CITY, STEP_DONE):
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Вы начали оформлять заявку но не закончили.\n\n"
+                     "Продолжить — просто напишите следующий ответ.\n"
+                     "Начать заново — /start",
+                reply_markup=KEYBOARDS["soft"]
+            )
+        except Exception:
+            pass
+
 async def send_lead(update, context, client_chat_id, ud):
     user     = update.effective_user
     username = f"@{user.username}" if user.username else f"ID: {client_chat_id}"
@@ -392,6 +507,7 @@ def main():
     app.add_handler(CommandHandler("post",    post_cmd))
     app.add_handler(CommandHandler("status",  status_cmd))
     app.add_handler(CommandHandler("cancel",  cancel_cmd))
+    app.add_handler(CommandHandler("price",   price_cmd))
     app.add_handler(MessageHandler(filters.CONTACT, handle_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен. Автопостинг активен.")
