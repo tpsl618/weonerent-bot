@@ -5,10 +5,10 @@
 import pytz
 from datetime import datetime
 
-MSK = pytz.timezone("Europe/Moscow")
+TZ = pytz.timezone("Europe/Madrid")
 
 def dt(day, month, hour, minute, year=2026):
-    return MSK.localize(datetime(year, month, day, hour, minute))
+    return TZ.localize(datetime(year, month, day, hour, minute))
 
 # ─── Типы кнопок: "full" | "soft" | "promo" | None ─────────────
 # full  → ✈️ Оставить заявку + 🌐 Сайт

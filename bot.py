@@ -26,14 +26,14 @@ ADMIN_USERNAME    = os.environ.get("ADMIN_USERNAME", "")   # Telegram username �
 def get_manager_url() -> str:
     return f"https://t.me/{ADMIN_USERNAME}" if ADMIN_USERNAME else "https://t.me/weonerent"
 
-MSK = pytz.timezone("Europe/Moscow")
+TZ = pytz.timezone("Europe/Madrid")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def is_working_hours() -> bool:
-    """Рабочее время менеджера: 9:00–20:00 МСК, ежедневно"""
-    hour = datetime.now(MSK).hour
+    """Рабочее время менеджера: 9:00–20:00 по Мадриду, ежедневно"""
+    hour = datetime.now(TZ).hour
     return 9 <= hour < 20
 
 # ─── Шаги заявки ────────────────────────────────────────────────
@@ -245,7 +245,7 @@ def parse_days(text: str) -> int:
         if (1 <= d1 <= 31 and 1 <= mo1 <= 12 and
                 1 <= d2 <= 31 and 1 <= mo2 <= 12):
             try:
-                yr = datetime.now(MSK).year
+                yr = datetime.now(TZ).year
                 dt1 = _date(yr, mo1, d1)
                 dt2 = _date(yr, mo2, d2)
                 if dt2 <= dt1:          # переход через новый год
@@ -265,7 +265,7 @@ def parse_days(text: str) -> int:
         mo1, mo2 = _MONTHS.get(mk1), _MONTHS.get(mk2)
         if mo1 and mo2:
             try:
-                yr = datetime.now(MSK).year
+                yr = datetime.now(TZ).year
                 dt1 = _date(yr, mo1, d1)
                 dt2 = _date(yr, mo2, d2)
                 if dt2 <= dt1:
@@ -282,7 +282,7 @@ def parse_days(text: str) -> int:
         d1, mo1, d2, mo2 = (int(x) for x in nums)
         if 1<=d1<=31 and 1<=mo1<=12 and 1<=d2<=31 and 1<=mo2<=12:
             try:
-                yr = datetime.now(MSK).year
+                yr = datetime.now(TZ).year
                 dt1 = _date(yr, mo1, d1)
                 dt2 = _date(yr, mo2, d2)
                 if dt2 <= dt1: dt2 = _date(yr+1, mo2, d2)
@@ -330,7 +330,7 @@ async def auto_publish(context: ContextTypes.DEFAULT_TYPE):
                 text=post["text"],
                 reply_markup=keyboard,
             )
-        logger.info(f"Auto-published post at {datetime.now(MSK).strftime('%d.%m %H:%M')}")
+        logger.info(f"Auto-published post at {datetime.now(TZ).strftime('%d.%m %H:%M')}")
     except Exception as e:
         logger.error(f"Auto-publish error: {e}")
         try:
@@ -350,13 +350,13 @@ async def publish_lifehack(context: ContextTypes.DEFAULT_TYPE):
             text=text,
             reply_markup=KEYBOARDS["soft"],
         )
-        logger.info(f"Lifehack published at {datetime.now(MSK).strftime('%d.%m %H:%M')}")
+        logger.info(f"Lifehack published at {datetime.now(TZ).strftime('%d.%m %H:%M')}")
     except Exception as e:
         logger.error(f"Lifehack publish error: {e}")
 
 # ─── Планировщик: запускается при старте бота ───────────────────
 def schedule_all_posts(app):
-    now = datetime.now(MSK)
+    now = datetime.now(TZ)
 
     # Разовые посты (Недели 1–8)
     count = 0
@@ -371,17 +371,17 @@ def schedule_all_posts(app):
             )
             count += 1
 
-    # Еженедельный отчёт — каждый понедельник в 08:00 МСК
+    # Еженедельный отчёт — каждый понедельник в 08:00 по Мадриду
     app.job_queue.run_repeating(
         send_weekly_report,
         interval=60 * 60 * 24 * 7,
-        first=dtime(8, 0, tzinfo=MSK),
+        first=dtime(8, 0, tzinfo=TZ),
         name="weekly_report",
     )
 
-    # Вечная ротация лайфхаков — каждый пн 09:30 и чт 19:30 МСК
+    # Вечная ротация лайфхаков — каждый пн 09:30 и чт 19:30 по Мадриду
     # Запускается начиная с 23 июня (после окончания основного расписания)
-    rotation_start = MSK.localize(datetime(2026, 6, 23, 0, 0))
+    rotation_start = TZ.localize(datetime(2026, 6, 23, 0, 0))
     if now < rotation_start:
         delay = (rotation_start - now).total_seconds()
     else:
@@ -402,7 +402,7 @@ def get_welcome_text() -> str:
     if is_working_hours():
         timing = "Менеджер ответит в течение 5 минут."
     else:
-        timing = "Сейчас нерабочее время (9:00–20:00 МСК) — менеджер ответит по возможности."
+        timing = "Сейчас нерабочее время (9:00–20:00 по Мадриду) — менеджер ответит по возможности."
     return (
         "Привет! 👋 Помогу подобрать и забронировать авто в Испании.\n\n"
         f"{timing}\n\n"
@@ -495,14 +495,14 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     OWNER_CHAT_ID = update.effective_chat.id
 
-    now   = datetime.now(MSK)
+    now   = datetime.now(TZ)
     total = len(SCHEDULED_POSTS)
     done  = sum(1 for p in SCHEDULED_POSTS if p["when"] <= now)
     left  = total - done
 
     next_post = next((p for p in SCHEDULED_POSTS if p["when"] > now), None)
     next_info = (
-        next_post["when"].strftime("%d.%m %H:%M") + " МСК"
+        next_post["when"].strftime("%d.%m %H:%M") + " (Мадрид)"
         if next_post else "— все опубликованы"
     )
 
@@ -518,8 +518,8 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update): return
-    now   = datetime.now(MSK)
-    lines = [f"📅 Расписание постов (сейчас {now.strftime('%d.%m %H:%M')} МСК)\n"]
+    now   = datetime.now(TZ)
+    lines = [f"📅 Расписание постов (сейчас {now.strftime('%d.%m %H:%M')} Мадрид)\n"]
     for p in SCHEDULED_POSTS:
         mark = "✅" if p["when"] <= now else "⏳"
         kind = "📊 Опрос" if p.get("type") == "poll" else "📝 Пост"
@@ -574,7 +574,7 @@ FAQ_TEXT = (
     "→ Да. Для подписчиков канала @weonerent — бесплатно.\n\n"
 
     "8. Как быстро ответит менеджер?\n"
-    "→ В течение 5 минут в рабочее время.\n\n"
+    "→ В течение 5 минут в рабочее время (9:00–20:00 по Мадриду).\n\n"
 
     "9. Можно отменить бронь?\n"
     "→ Да, бесплатно за 48 часов до выезда.\n\n"
@@ -823,7 +823,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if is_working_hours():
                 response_note = "Менеджер свяжется с вами в течение 5 минут."
             else:
-                response_note = "Менеджер ответит по возможности — сейчас нерабочее время (9:00–20:00 МСК)."
+                response_note = "Менеджер ответит по возможности — сейчас нерабочее время (9:00–20:00 по Мадриду)."
 
             summary = (
                 "🎉 Заявка оформлена!\n\n"
@@ -952,7 +952,7 @@ async def remind_abandoned(context: ContextTypes.DEFAULT_TYPE):
         if is_working_hours():
             timing_note = "⏱ Менеджер сейчас онлайн — ответит в течение 5 минут."
         else:
-            timing_note = "🕘 Менеджер ответит в рабочее время (9:00–20:00 МСК)."
+            timing_note = "🕘 Менеджер ответит в рабочее время (9:00–20:00 по Мадриду)."
         try:
             await context.bot.send_message(
                 chat_id=chat_id,
