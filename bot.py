@@ -433,7 +433,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 data={"chat_id": chat_id},
                 name=f"remind_{chat_id}",
             )
+            # Показываем ориентировочные цены для названного города
+            city_key = text.lower().strip()
+            city_key = CITY_ALIASES.get(city_key, city_key)
+            prices   = PRICES.get(city_key)
+            if prices:
+                price_hint = (
+                    f"💰 Ориентировочные цены в {text.capitalize()}:\n"
+                    f"Эконом от €{prices['эконом']}/сутки · "
+                    f"Комфорт от €{prices['комфорт']}/сутки · "
+                    f"SUV от €{prices['suv']}/сутки\n\n"
+                )
+            else:
+                price_hint = ""
             await update.message.reply_text(
+                f"{price_hint}"
                 "Минимальный срок аренды — 3 суток.\n\n"
                 "На какой срок хотите взять автомобиль?\n"
                 "Укажите даты: с ... по ...",
@@ -449,8 +463,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif step == STEP_CAR:
             ud["car"] = text
             ud["step"] = STEP_NAME
+            # Считаем примерную сумму если знаем даты
+            total_hint = ""
+            try:
+                dates_raw = ud.get("dates", "")
+                # Пробуем найти число дней из фраз "5 дней", "с 1 по 7" и т.п.
+                import re
+                nums = re.findall(r"\d+", dates_raw)
+                if len(nums) >= 2:
+                    days = abs(int(nums[1]) - int(nums[0]))
+                    if days == 0:
+                        days = int(nums[-1])
+                elif len(nums) == 1:
+                    days = int(nums[0])
+                else:
+                    days = 0
+
+                if 3 <= days <= 60:
+                    city_key = ud.get("city", "").lower().strip()
+                    city_key = CITY_ALIASES.get(city_key, city_key)
+                    car_key  = text.lower().strip()
+                    car_key  = CAR_ALIASES.get(car_key, car_key)
+                    base, total, disc_pct = calc_price(city_key, car_key, days)
+                    if total:
+                        disc_text = f" (скидка {disc_pct}% за длительность)" if disc_pct else ""
+                        total_hint = (
+                            f"\n\n💰 Примерная стоимость: от €{total} за {days} дней{disc_text}"
+                        )
+            except Exception:
+                pass
+
             await update.message.reply_text(
-                "Ваше имя и фамилия?",
+                f"Отлично.{total_hint}\n\nВаше имя и фамилия?",
                 reply_markup=REMOVE
             )
         elif step == STEP_NAME:
