@@ -41,6 +41,31 @@ STEP_POST_TEXT    = "post_text"
 STEP_POST_BUTTONS = "post_buttons"
 
 # ─── Клавиатуры для заявки ──────────────────────────────────────
+CITY_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        ["🏙 Барселона",  "🏛 Мадрид"],
+        ["☀️ Малага",     "🌴 Аликанте"],
+        ["🏖 Валенсия",   "🎭 Севилья"],
+        ["🌊 Торревьеха", "🏄 Гандия"],
+        ["⛵ Дения",      "🌴 Марбелья"],
+    ],
+    resize_keyboard=True, one_time_keyboard=True
+)
+
+# Маппинг кнопок → ключи для PRICES
+CITY_BUTTON_MAP = {
+    "🏙 Барселона":  "барселона",
+    "🏛 Мадрид":     "мадрид",
+    "☀️ Малага":     "малага",
+    "🌴 Аликанте":   "аликанте",
+    "🏖 Валенсия":   "валенсия",
+    "🎭 Севилья":    "севилья",
+    "🌊 Торревьеха": "торревьеха",
+    "🏄 Гандия":     "гандия",
+    "⛵ Дения":      "дения",
+    "🌴 Марбелья":   "марбелья",
+}
+
 CAR_KEYBOARD = ReplyKeyboardMarkup(
     [["Эконом", "Комфорт"], ["SUV", "Минивэн"]],
     resize_keyboard=True, one_time_keyboard=True
@@ -285,11 +310,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_data[chat_id] = {"step": STEP_CITY}
         await query.message.reply_text(
             "Отлично, оформляем заявку! 🚗\n\n"
-            "Это займёт буквально пару минут.\n\n"
-            "В каком городе Испании вам нужен автомобиль?\n\n"
-            "Барселона · Мадрид · Малага · Аликанте · Валенсия\n"
-            "Севилья · Торревьеха · Гандия · Дения · Марбелья",
-            reply_markup=REMOVE
+            "Шаг 1 из 4 — выберите город:",
+            reply_markup=CITY_KEYBOARD
         )
 
     elif data == "menu_price":
@@ -541,34 +563,43 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
     try:
         if step == STEP_CITY:
-            ud["city"] = text
-            ud["step"] = STEP_DATES
+            # Нормализуем: кнопка «🏙 Барселона» → «Барселона»
+            city_clean = CITY_BUTTON_MAP.get(text, text)
+            city_display = city_clean.capitalize()
+
+            # Проверяем — город из нашего списка?
+            city_key = CITY_ALIASES.get(city_clean.lower(), city_clean.lower())
+            if city_key not in PRICES:
+                await update.message.reply_text(
+                    "Мы пока не работаем в этом городе. "
+                    "Выберите город из списка 👇",
+                    reply_markup=CITY_KEYBOARD
+                )
+                return
+
+            ud["city"]     = city_display
+            ud["city_key"] = city_key
+            ud["step"]     = STEP_DATES
             track_start()
-            # Планируем напоминание через 2 часа если не завершит
+
+            # Напоминание через 2 часа если не завершит
             context.job_queue.run_once(
                 remind_abandoned,
                 when=60 * 60 * 2,
                 data={"chat_id": chat_id},
                 name=f"remind_{chat_id}",
             )
-            # Показываем ориентировочные цены для названного города
-            city_key = text.lower().strip()
-            city_key = CITY_ALIASES.get(city_key, city_key)
-            prices   = PRICES.get(city_key)
-            if prices:
-                price_hint = (
-                    f"💰 Ориентировочные цены в {text.capitalize()}:\n"
-                    f"Эконом от €{prices['эконом']}/сутки · "
-                    f"Комфорт от €{prices['комфорт']}/сутки · "
-                    f"SUV от €{prices['suv']}/сутки\n\n"
-                )
-            else:
-                price_hint = ""
+
+            prices = PRICES[city_key]
             await update.message.reply_text(
-                f"{price_hint}"
-                "Минимальный срок аренды — 3 суток.\n\n"
-                "На какой срок хотите взять автомобиль?\n"
-                "Укажите даты: с ... по ...",
+                f"✅ Город: {city_display}\n\n"
+                f"💰 Ориентировочные цены:\n"
+                f"Эконом от €{prices['эконом']}/сутки · "
+                f"Комфорт от €{prices['комфорт']}/сутки · "
+                f"SUV от €{prices['suv']}/сутки\n\n"
+                "Шаг 2 из 4 — на какой срок нужен автомобиль?\n\n"
+                "Укажите даты или количество дней.\n"
+                "Например: с 10 по 17 июля  или  7 дней",
                 reply_markup=REMOVE
             )
         elif step == STEP_DATES:
@@ -598,8 +629,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     days = 0
 
                 if 3 <= days <= 60:
-                    city_key = ud.get("city", "").lower().strip()
-                    city_key = CITY_ALIASES.get(city_key, city_key)
+                    city_key = ud.get("city_key", ud.get("city", "").lower().strip())
                     car_key  = text.lower().strip()
                     car_key  = CAR_ALIASES.get(car_key, car_key)
                     base, total, disc_pct = calc_price(city_key, car_key, days)
