@@ -702,28 +702,61 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         elif step == STEP_PHONE:
             ud["phone"] = text
-            ud["step"] = STEP_DONE
+            ud["step"]  = STEP_DONE
+
+            city    = ud.get("city", "—")
+            dates   = ud.get("dates", "—")
+            car     = ud.get("car", "—")
+            name    = ud.get("name", "—")
+            phone   = ud.get("phone", "—")
+
+            # Оценка стоимости для итогового сообщения
+            price_line = ""
+            days = ud.get("days_estimate", 0)
+            city_key = ud.get("city_key", "")
+            car_key  = CAR_ALIASES.get(car.lower().strip(), car.lower().strip())
+            if 3 <= days <= 60 and city_key:
+                try:
+                    _, total, disc_pct = calc_price(city_key, car_key, days)
+                    if total:
+                        disc_text = f" (скидка {disc_pct}%)" if disc_pct else ""
+                        price_line = f"\n💰 Ориентировочно: от €{total}{disc_text}"
+                except Exception:
+                    pass
+
             summary = (
-                "Заявка принята.\n\n"
-                f"Город: {ud.get('city', '—')}\n"
-                f"Даты: {ud.get('dates', '—')}\n"
-                f"Автомобиль: {ud.get('car', '—')}\n"
-                f"Имя: {ud.get('name', '—')}\n"
-                f"Телефон: {ud.get('phone', '—')}\n\n"
-                "Менеджер свяжется с вами в течение 5 минут в рабочее время."
+                "🎉 Заявка оформлена!\n\n"
+                "Вот что мы передали менеджеру:\n"
+                "─────────────────────\n"
+                f"📍 Город: {city}\n"
+                f"📅 Срок: {dates}\n"
+                f"🚗 Автомобиль: {car}\n"
+                f"👤 Имя: {name}\n"
+                f"📞 Телефон: {phone}"
+                f"{price_line}\n"
+                "─────────────────────\n\n"
+                "Менеджер свяжется с вами в течение 5 минут "
+                "в рабочее время и уточнит все детали. "
+                "Если что-то изменится — просто напишите ему напрямую."
             )
             await update.message.reply_text(summary, reply_markup=REMOVE)
-            track_lead(ud.get("city", "unknown"))
+            track_lead(city)
             await send_lead(update, context, chat_id, ud)
+
+            # Предлагаем канал с пояснением зачем
             await update.message.reply_text(
-                "В нашем канале — лайфхаки про аренду авто, маршруты и актуальные цены.",
+                "Пока ждёте ответа — подпишитесь на наш канал 👇\n\n"
+                "Там маршруты по Испании, лайфхаки об аренде авто "
+                "и актуальные цены каждую неделю.",
                 reply_markup=SUBSCRIBE_KEYBOARD
             )
+
         elif step == STEP_DONE:
+            # После завершения заявки — возвращаем в меню
+            user_data[chat_id] = {"step": None}
             await update.message.reply_text(
-                "Ваша заявка уже принята. Менеджер скоро свяжется.\n\n"
-                "Для новой заявки — /start",
-                reply_markup=REMOVE
+                "Ваша заявка уже принята 👍\n\nЧем ещё могу помочь?",
+                reply_markup=MAIN_MENU
             )
     except Exception as e:
         logger.error(f"Ошибка: {e}")
