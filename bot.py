@@ -17,7 +17,7 @@ from itertools import cycle
 from content import SCHEDULED_POSTS, LIFEHACKS
 
 BOT_TOKEN      = os.environ["BOT_TOKEN"]
-GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
+GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")   # резерв для AI-функций
 OWNER_CHAT_ID  = int(os.environ.get("OWNER_CHAT_ID", "448609289"))
 CHANNEL_ID        = os.environ.get("CHANNEL_ID", "@weonerent")
 DISCUSSION_GROUP  = os.environ.get("DISCUSSION_GROUP", "")   # ID группы обсуждения
