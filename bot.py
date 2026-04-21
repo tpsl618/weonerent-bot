@@ -1,4 +1,6 @@
 import os
+import json
+import base64
 import logging
 import pytz
 from datetime import datetime
@@ -23,7 +25,9 @@ CHANNEL_ID        = os.environ.get("CHANNEL_ID", "@weonerent")
 DISCUSSION_GROUP  = os.environ.get("DISCUSSION_GROUP", "")   # ID группы обсуждения
 ADMIN_USERNAME    = os.environ.get("ADMIN_USERNAME", "")   # Telegram username без @
 
-MANAGER_FALLBACK = "fake_smm"   # дефолт если ADMIN_USERNAME не задан в env
+MANAGER_FALLBACK    = "fake_smm"   # дефолт если ADMIN_USERNAME не задан в env
+GOOGLE_SHEET_ID     = os.environ.get("GOOGLE_SHEET_ID", "")
+GOOGLE_CREDS_B64    = os.environ.get("GOOGLE_CREDS_B64", "")   # JSON ключ сервис-аккаунта в base64
 
 def get_manager_url() -> str:
     username = ADMIN_USERNAME or MANAGER_FALLBACK
@@ -151,6 +155,100 @@ BUTTON_MAP = {
     "🔥 Акция":      KEYBOARDS["promo"],
     "❌ Без кнопок": None,
 }
+
+# ─── Google Sheets ──────────────────────────────────────────────
+SHEET_HEADERS = [
+    "Дата", "Имя", "Телефон", "Город", "Срок аренды",
+    "Автомобиль", "Стоимость (ориент.)", "Telegram", "Chat ID", "Статус"
+]
+
+def _get_gspread_client():
+    """Возвращает авторизованный gspread клиент или None если не настроено."""
+    if not GOOGLE_CREDS_B64 or not GOOGLE_SHEET_ID:
+        return None
+    try:
+        import gspread
+        from google.oauth2.service_account import Credentials
+        creds_json = json.loads(base64.b64decode(GOOGLE_CREDS_B64))
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
+        return gspread.authorize(creds)
+    except Exception as e:
+        logger.error(f"Google Sheets auth error: {e}")
+        return None
+
+def _ensure_headers(sheet):
+    """Создаёт заголовки если лист пустой."""
+    try:
+        first_row = sheet.row_values(1)
+        if not first_row:
+            sheet.append_row(SHEET_HEADERS, value_input_option="USER_ENTERED")
+    except Exception:
+        pass
+
+def append_lead_to_sheets(ud: dict, user, chat_id: int, price_est: str = ""):
+    """Добавляет лид в Google Sheets. Вызывается синхронно из send_lead."""
+    if not GOOGLE_SHEET_ID or not GOOGLE_CREDS_B64:
+        return
+    try:
+        client = _get_gspread_client()
+        if not client:
+            return
+        sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
+        _ensure_headers(sheet)
+        username = f"@{user.username}" if user.username else f"tg://user?id={chat_id}"
+        now = datetime.now(TZ).strftime("%d.%m.%Y %H:%M")
+        row = [
+            now,
+            ud.get("name", "—"),
+            ud.get("phone", "—"),
+            ud.get("city", "—"),
+            ud.get("dates", "—"),
+            ud.get("car", "—"),
+            price_est,
+            username,
+            str(chat_id),
+            "Новый",
+        ]
+        sheet.append_row(row, value_input_option="USER_ENTERED")
+        logger.info(f"Lead saved to Google Sheets: {ud.get('name')} / {ud.get('city')}")
+    except Exception as e:
+        logger.error(f"Google Sheets append error: {e}")
+
+def get_sheets_stats_this_week() -> dict:
+    """Читает Google Sheets и считает статистику за текущую неделю."""
+    result = {"total": 0, "cities": {}}
+    if not GOOGLE_SHEET_ID or not GOOGLE_CREDS_B64:
+        return result
+    try:
+        client = _get_gspread_client()
+        if not client:
+            return result
+        sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
+        rows = sheet.get_all_values()
+        if len(rows) <= 1:   # только заголовки или пусто
+            return result
+        now = datetime.now(TZ)
+        # Начало текущей недели (понедельник 00:00)
+        week_start = now.replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ) - __import__('datetime').timedelta(days=now.weekday())
+        for row in rows[1:]:   # пропускаем заголовок
+            if len(row) < 4:
+                continue
+            try:
+                date_str = row[0]   # "21.04.2026 14:30"
+                row_dt = datetime.strptime(date_str, "%d.%m.%Y %H:%M")
+                row_dt = TZ.localize(row_dt)
+                if row_dt >= week_start:
+                    result["total"] += 1
+                    city = row[3].lower().strip()
+                    result["cities"][city] = result["cities"].get(city, 0) + 1
+            except (ValueError, IndexError):
+                continue
+    except Exception as e:
+        logger.error(f"Google Sheets read error: {e}")
+    return result
 
 # ─── Калькулятор цен ────────────────────────────────────────────
 PRICES = {
@@ -899,26 +997,38 @@ async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
     weekly_stats["started"] = 0
     weekly_stats["cities"]  = {}
 
+    # Дополняем данными из Google Sheets (более надёжный источник)
+    sheets_stats = get_sheets_stats_this_week()
+    total_leads  = sheets_stats["total"] if sheets_stats["total"] > 0 else stats["leads"]
+    cities_data  = sheets_stats["cities"] if sheets_stats["cities"] else stats["cities"]
+
     cities_text = "\n".join(
         f"  {c.capitalize()}: {n}" for c, n in
-        sorted(stats["cities"].items(), key=lambda x: -x[1])
+        sorted(cities_data.items(), key=lambda x: -x[1])
     ) or "  —"
 
     conversion = (
-        f"{round(stats['leads'] / stats['started'] * 100)}%"
+        f"{round(total_leads / stats['started'] * 100)}%"
         if stats["started"] > 0 else "—"
+    )
+
+    sheets_note = (
+        "\n📋 Данные из Google Sheets"
+        if sheets_stats["total"] > 0 else
+        "\n⚠️ Google Sheets не подключён — данные из памяти"
     )
 
     report = (
         f"📊 Еженедельный отчёт WeOneRent\n"
         f"{'─' * 25}\n"
         f"Начали заявку: {stats['started']}\n"
-        f"Завершили заявку: {stats['leads']}\n"
+        f"Завершили заявку: {total_leads}\n"
         f"Конверсия: {conversion}\n"
         f"{'─' * 25}\n"
         f"По городам:\n{cities_text}\n"
         f"{'─' * 25}\n"
-        f"Следующий пост в канале: смотри /status"
+        f"Следующий пост: /status"
+        f"{sheets_note}"
     )
     try:
         await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=report)
@@ -990,8 +1100,22 @@ async def remind_abandoned(context: ContextTypes.DEFAULT_TYPE):
 async def send_lead(update, context, client_chat_id, ud):
     user     = update.effective_user
     username = f"@{user.username}" if user.username else f"ID: {client_chat_id}"
+
+    # Считаем ориентировочную стоимость для Sheets
+    price_est = ""
+    days     = ud.get("days_estimate", 0)
+    city_key = ud.get("city_key", "")
+    car_key  = CAR_ALIASES.get(ud.get("car", "").lower().strip(), ud.get("car", "").lower().strip())
+    if 3 <= days <= 60 and city_key:
+        try:
+            _, total = calc_price(city_key, car_key, days)
+            if total:
+                price_est = f"от €{total}"
+        except Exception:
+            pass
+
     lead = (
-        f"НОВАЯ ЗАЯВКА — WeOneRent\n"
+        f"🆕 НОВАЯ ЗАЯВКА — WeOneRent\n"
         f"{'─' * 25}\n"
         f"Клиент: {user.full_name or '—'} ({username})\n"
         f"{'─' * 25}\n"
@@ -1000,6 +1124,7 @@ async def send_lead(update, context, client_chat_id, ud):
         f"Авто: {ud.get('car', '—')}\n"
         f"Имя: {ud.get('name', '—')}\n"
         f"Телефон: {ud.get('phone', '—')}\n"
+        + (f"Стоимость: {price_est}\n" if price_est else "") +
         f"{'─' * 25}\n"
         f"Написать: tg://user?id={client_chat_id}"
     )
@@ -1008,6 +1133,12 @@ async def send_lead(update, context, client_chat_id, ud):
         logger.info(f"Заявка отправлена от {username}")
     except Exception as e:
         logger.error(f"Ошибка отправки: {e}")
+
+    # Сохраняем в Google Sheets (отдельно, чтобы ошибка Sheets не ломала Telegram)
+    try:
+        append_lead_to_sheets(ud, user, client_chat_id, price_est)
+    except Exception as e:
+        logger.error(f"Sheets lead error: {e}")
 
 # ─── Запуск ─────────────────────────────────────────────────────
 def main():
