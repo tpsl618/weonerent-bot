@@ -1,7 +1,7 @@
 import os
 import json
-import base64
 import logging
+import requests as _requests
 import pytz
 from datetime import datetime, timedelta
 from telegram import (
@@ -26,8 +26,7 @@ DISCUSSION_GROUP  = os.environ.get("DISCUSSION_GROUP", "")   # ID группы �
 ADMIN_USERNAME    = os.environ.get("ADMIN_USERNAME", "")   # Telegram username без @
 
 MANAGER_FALLBACK    = "fake_smm"   # дефолт если ADMIN_USERNAME не задан в env
-GOOGLE_SHEET_ID     = os.environ.get("GOOGLE_SHEET_ID", "")
-GOOGLE_CREDS_B64    = os.environ.get("GOOGLE_CREDS_B64", "")   # JSON ключ сервис-аккаунта в base64
+GOOGLE_SCRIPT_URL   = os.environ.get("GOOGLE_SCRIPT_URL", "")  # URL Google Apps Script вебхука
 
 def get_manager_url() -> str:
     username = ADMIN_USERNAME or MANAGER_FALLBACK
@@ -156,98 +155,53 @@ BUTTON_MAP = {
     "❌ Без кнопок": None,
 }
 
-# ─── Google Sheets ──────────────────────────────────────────────
-SHEET_HEADERS = [
-    "Дата", "Имя", "Телефон", "Город", "Срок аренды",
-    "Автомобиль", "Стоимость (ориент.)", "Telegram", "Chat ID", "Статус"
-]
-
-def _get_gspread_client():
-    """Возвращает авторизованный gspread клиент или None если не настроено."""
-    if not GOOGLE_CREDS_B64 or not GOOGLE_SHEET_ID:
-        return None
-    try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-        creds_json = json.loads(base64.b64decode(GOOGLE_CREDS_B64))
-        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-        creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
-        return gspread.authorize(creds)
-    except Exception as e:
-        logger.error(f"Google Sheets auth error: {e}")
-        return None
-
-def _ensure_headers(sheet):
-    """Создаёт заголовки если лист пустой."""
-    try:
-        first_row = sheet.row_values(1)
-        if not first_row:
-            sheet.append_row(SHEET_HEADERS, value_input_option="USER_ENTERED")
-    except Exception:
-        pass
-
+# ─── Google Sheets (через Apps Script webhook) ───────────────────
 def append_lead_to_sheets(ud: dict, user, chat_id: int, price_est: str = ""):
-    """Добавляет лид в Google Sheets. Вызывается синхронно из send_lead."""
-    if not GOOGLE_SHEET_ID or not GOOGLE_CREDS_B64:
+    """Отправляет лид в Google Sheets через Apps Script URL."""
+    if not GOOGLE_SCRIPT_URL:
         return
     try:
-        client = _get_gspread_client()
-        if not client:
-            return
-        sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
-        _ensure_headers(sheet)
         username = f"@{user.username}" if user.username else f"tg://user?id={chat_id}"
-        now = datetime.now(TZ).strftime("%d.%m.%Y %H:%M")
-        row = [
-            now,
-            ud.get("name", "—"),
-            ud.get("phone", "—"),
-            ud.get("city", "—"),
-            ud.get("dates", "—"),
-            ud.get("car", "—"),
-            price_est,
-            username,
-            str(chat_id),
-            "Новый",
-        ]
-        sheet.append_row(row, value_input_option="USER_ENTERED")
-        logger.info(f"Lead saved to Google Sheets: {ud.get('name')} / {ud.get('city')}")
+        payload = {
+            "date":     datetime.now(TZ).strftime("%d.%m.%Y %H:%M"),
+            "name":     ud.get("name", "—"),
+            "phone":    ud.get("phone", "—"),
+            "city":     ud.get("city", "—"),
+            "dates":    ud.get("dates", "—"),
+            "car":      ud.get("car", "—"),
+            "price":    price_est,
+            "telegram": username,
+            "chat_id":  str(chat_id),
+            "status":   "Новый",
+        }
+        resp = _requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=10)
+        if resp.status_code == 200:
+            logger.info(f"Lead saved to Sheets: {ud.get('name')} / {ud.get('city')}")
+        else:
+            logger.error(f"Sheets webhook returned {resp.status_code}: {resp.text[:200]}")
     except Exception as e:
-        logger.error(f"Google Sheets append error: {e}")
+        logger.error(f"Google Sheets error: {e}")
 
 def get_sheets_stats_this_week() -> dict:
-    """Читает Google Sheets и считает статистику за текущую неделю."""
+    """Запрашивает статистику за текущую неделю из Apps Script."""
     result = {"total": 0, "cities": {}}
-    if not GOOGLE_SHEET_ID or not GOOGLE_CREDS_B64:
+    if not GOOGLE_SCRIPT_URL:
         return result
     try:
-        client = _get_gspread_client()
-        if not client:
-            return result
-        sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
-        rows = sheet.get_all_values()
-        if len(rows) <= 1:   # только заголовки или пусто
-            return result
         now = datetime.now(TZ)
-        # Начало текущей недели (понедельник 00:00)
-        week_start = now.replace(
-            hour=0, minute=0, second=0, microsecond=0
-        ) - timedelta(days=now.weekday())
-        for row in rows[1:]:   # пропускаем заголовок
-            if len(row) < 4:
-                continue
-            try:
-                date_str = row[0]   # "21.04.2026 14:30"
-                row_dt = datetime.strptime(date_str, "%d.%m.%Y %H:%M")
-                row_dt = TZ.localize(row_dt)
-                if row_dt >= week_start:
-                    result["total"] += 1
-                    city = row[3].lower().strip()
-                    result["cities"][city] = result["cities"].get(city, 0) + 1
-            except (ValueError, IndexError):
-                continue
+        week_start = (now.replace(hour=0, minute=0, second=0, microsecond=0)
+                      - timedelta(days=now.weekday()))
+        resp = _requests.get(
+            GOOGLE_SCRIPT_URL,
+            params={"action": "stats", "since": week_start.strftime("%d.%m.%Y")},
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            result["total"]  = data.get("total", 0)
+            result["cities"] = data.get("cities", {})
     except Exception as e:
-        logger.error(f"Google Sheets read error: {e}")
+        logger.error(f"Sheets stats error: {e}")
     return result
 
 # ─── Калькулятор цен ────────────────────────────────────────────
@@ -668,66 +622,33 @@ async def sheetstest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lines = ["🔍 Диагностика Google Sheets\n"]
+    lines.append(f"GOOGLE_SCRIPT_URL: {'✅ задан' if GOOGLE_SCRIPT_URL else '❌ не задан'}\n")
 
-    # 1. Переменные окружения
-    lines.append(f"GOOGLE_SHEET_ID:  {'✅ задан' if GOOGLE_SHEET_ID else '❌ не задан'}")
-    lines.append(f"GOOGLE_CREDS_B64: {'✅ задан' if GOOGLE_CREDS_B64 else '❌ не задан'}\n")
-
-    if not GOOGLE_SHEET_ID or not GOOGLE_CREDS_B64:
-        lines.append("⛔ Добавь переменные в Railway и передеплой.")
+    if not GOOGLE_SCRIPT_URL:
+        lines.append("⛔ Добавь переменную GOOGLE_SCRIPT_URL в Railway.")
+        lines.append("Инструкция — смотри последнее сообщение в чате.")
         await update.message.reply_text("\n".join(lines))
         return
 
-    # 2. Декодирование base64
+    # Тестовая запись
     try:
-        creds_json = json.loads(base64.b64decode(GOOGLE_CREDS_B64))
-        lines.append(f"✅ base64 декодирован")
-        lines.append(f"✅ Сервис-аккаунт: {creds_json.get('client_email', '?')}\n")
+        payload = {
+            "date": datetime.now(TZ).strftime("%d.%m.%Y %H:%M"),
+            "name": "ТЕСТ", "phone": "+34 000 000 000",
+            "city": "Барселона", "dates": "7 дней",
+            "car": "Эконом", "price": "от €224",
+            "telegram": "@sheetstest", "chat_id": "0", "status": "Тест",
+        }
+        resp = _requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=15)
+        if resp.status_code == 200:
+            lines.append("✅ Тестовая строка записана в таблицу!")
+            lines.append("🎉 Всё работает — удали строку «ТЕСТ» из таблицы.")
+        else:
+            lines.append(f"❌ Сервер ответил {resp.status_code}")
+            lines.append(f"Текст ответа: {resp.text[:300]}")
     except Exception as e:
-        lines.append(f"❌ Ошибка декодирования base64: {e}")
-        lines.append("\nПроверь что скопировал строку целиком без пробелов и переносов.")
-        await update.message.reply_text("\n".join(lines))
-        return
-
-    # 3. Авторизация в Google
-    try:
-        import gspread
-        from google.oauth2.service_account import Credentials
-        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-        creds = Credentials.from_service_account_info(creds_json, scopes=scopes)
-        client = gspread.authorize(creds)
-        lines.append("✅ Авторизация в Google — OK\n")
-    except Exception as e:
-        lines.append(f"❌ Ошибка авторизации: {e}")
-        await update.message.reply_text("\n".join(lines))
-        return
-
-    # 4. Открытие таблицы
-    try:
-        sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
-        lines.append(f"✅ Таблица открыта: «{sheet.spreadsheet.title}»")
-        lines.append(f"   Лист: «{sheet.title}», строк: {sheet.row_count}\n")
-    except Exception as e:
-        lines.append(f"❌ Не удалось открыть таблицу: {e}")
-        lines.append("\nПроверь:")
-        lines.append("• Правильный ли GOOGLE_SHEET_ID?")
-        lines.append(f"• Поделился ли таблицей с {creds_json.get('client_email', 'сервис-аккаунтом')}?")
-        await update.message.reply_text("\n".join(lines))
-        return
-
-    # 5. Тестовая запись
-    try:
-        _ensure_headers(sheet)
-        test_row = [
-            datetime.now(TZ).strftime("%d.%m.%Y %H:%M"),
-            "TEST", "TEST", "Тест", "1 день",
-            "Эконом", "—", "@admin_test", "0", "Тест"
-        ]
-        sheet.append_row(test_row, value_input_option="USER_ENTERED")
-        lines.append("✅ Тестовая строка записана в таблицу!")
-        lines.append("\n🎉 Всё работает. Можешь удалить тестовую строку из таблицы.")
-    except Exception as e:
-        lines.append(f"❌ Ошибка записи: {e}")
+        lines.append(f"❌ Ошибка соединения: {e}")
+        lines.append("\nПроверь что URL скопирован полностью и Apps Script задеплоен.")
 
     await update.message.reply_text("\n".join(lines))
 
