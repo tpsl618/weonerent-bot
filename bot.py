@@ -156,31 +156,73 @@ BUTTON_MAP = {
 }
 
 # ─── Google Sheets (через Apps Script webhook) ───────────────────
+# ─── Очередь неотправленных лидов (retry) ───────────────────────
+import threading as _threading
+_failed_leads_queue: list = []
+_queue_lock = _threading.Lock()
+
+def _post_to_sheets_with_retry(payload: dict, max_attempts: int = 3) -> bool:
+    """POST в Apps Script с экспоненциальным backoff. True = успех."""
+    import time as _time
+    for attempt in range(max_attempts):
+        try:
+            resp = _requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=15)
+            if resp.status_code == 200:
+                return True
+            logger.warning(f"Sheets attempt {attempt+1}: HTTP {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Sheets attempt {attempt+1}: {e}")
+        if attempt < max_attempts - 1:
+            _time.sleep(2 ** attempt)   # 1s → 2s перед следующей попыткой
+    return False
+
 def append_lead_to_sheets(ud: dict, user, chat_id: int, price_est: str = ""):
-    """Отправляет лид в Google Sheets через Apps Script URL."""
+    """Отправляет лид в Google Sheets. При неудаче — кладёт в очередь retry."""
     if not GOOGLE_SCRIPT_URL:
         return
-    try:
-        username = f"@{user.username}" if user.username else f"tg://user?id={chat_id}"
-        payload = {
-            "date":     datetime.now(TZ).strftime("%d.%m.%Y %H:%M"),
-            "name":     ud.get("name", "—"),
-            "phone":    ud.get("phone", "—"),
-            "city":     ud.get("city", "—"),
-            "dates":    ud.get("dates", "—"),
-            "car":      ud.get("car", "—"),
-            "price":    price_est,
-            "telegram": username,
-            "chat_id":  str(chat_id),
-            "status":   "Новый",
-        }
-        resp = _requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=10)
-        if resp.status_code == 200:
-            logger.info(f"Lead saved to Sheets: {ud.get('name')} / {ud.get('city')}")
-        else:
-            logger.error(f"Sheets webhook returned {resp.status_code}: {resp.text[:200]}")
-    except Exception as e:
-        logger.error(f"Google Sheets error: {e}")
+    username = f"@{user.username}" if user.username else f"tg://user?id={chat_id}"
+    payload = {
+        "date":     datetime.now(TZ).strftime("%d.%m.%Y %H:%M"),
+        "name":     ud.get("name", "—"),
+        "phone":    ud.get("phone", "—"),
+        "city":     ud.get("city", "—"),
+        "dates":    ud.get("dates", "—"),
+        "car":      ud.get("car", "—"),
+        "price":    price_est,
+        "telegram": username,
+        "chat_id":  str(chat_id),
+        "status":   "Новый",
+    }
+    if _post_to_sheets_with_retry(payload):
+        logger.info(f"Lead saved to Sheets: {ud.get('name')} / {ud.get('city')}")
+    else:
+        logger.error(f"Sheets: все попытки исчерпаны, лид в очереди retry")
+        with _queue_lock:
+            _failed_leads_queue.append(payload)
+
+async def flush_failed_leads(context: ContextTypes.DEFAULT_TYPE):
+    """Job: каждые 10 минут повторяет попытку отправить неудавшиеся лиды."""
+    with _queue_lock:
+        queue_copy = list(_failed_leads_queue)
+    if not queue_copy:
+        return
+    recovered = []
+    for payload in queue_copy:
+        if _post_to_sheets_with_retry(payload, max_attempts=2):
+            recovered.append(payload)
+            logger.info(f"Recovered lead: {payload.get('name')}")
+    if recovered:
+        with _queue_lock:
+            for p in recovered:
+                if p in _failed_leads_queue:
+                    _failed_leads_queue.remove(p)
+        try:
+            await context.bot.send_message(
+                chat_id=OWNER_CHAT_ID,
+                text=f"✅ Восстановлено {len(recovered)} лидов в Google Sheets"
+            )
+        except Exception:
+            pass
 
 def get_sheets_stats_this_week() -> dict:
     """Запрашивает статистику за текущую неделю из Apps Script."""
@@ -362,6 +404,12 @@ def get_user(chat_id):
         user_data[chat_id] = {"step": STEP_CITY}
     return user_data[chat_id]
 
+def is_valid_phone(text: str) -> bool:
+    """Проверяет что номер телефона содержит от 7 до 15 цифр."""
+    import re as _re2
+    digits = _re2.sub(r'\D', '', text)
+    return 7 <= len(digits) <= 15
+
 def is_admin(update: Update) -> bool:
     user = update.effective_user
     # Проверка по username (если задан) или по OWNER_CHAT_ID
@@ -451,6 +499,14 @@ def schedule_all_posts(app):
         interval=60 * 60 * 24 * 7 / 2,   # дважды в неделю (каждые 3.5 дня)
         first=rotation_start if now < rotation_start else now,
         name="lifehack_rotation",
+    )
+
+    # Retry неотправленных лидов — каждые 10 минут
+    app.job_queue.run_repeating(
+        flush_failed_leads,
+        interval=60 * 10,
+        first=60,
+        name="flush_leads",
     )
 
     logger.info(f"Запланировано {count} постов + вечная ротация лайфхаков")
@@ -947,8 +1003,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=PHONE_KEYBOARD
             )
         elif step == STEP_PHONE:
+            # Валидация номера (пропускаем если пришёл контакт — уже проверен)
+            if not update.message.contact and not is_valid_phone(text):
+                await update.message.reply_text(
+                    "Не похоже на номер телефона 🙈\n\n"
+                    "Введите с кодом страны, например:\n"
+                    "+34 612 345 678  или  +7 999 123 45 67",
+                    reply_markup=PHONE_KEYBOARD
+                )
+                return
+
+            # Защита от дублей — не отправляем заявку дважды
+            if ud.get("lead_sent"):
+                await update.message.reply_text(
+                    "Ваша заявка уже принята 👍 Менеджер скоро свяжется.",
+                    reply_markup=build_main_menu()
+                )
+                return
+
             ud["phone"] = text
             ud["step"]  = STEP_DONE
+            ud["lead_sent"] = True
 
             city    = ud.get("city", "—")
             dates   = ud.get("dates", "—")
@@ -975,7 +1050,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 response_note = "Менеджер ответит по возможности — сейчас нерабочее время (9:00–20:00 по Мадриду)."
 
             summary = (
-                "🎉 Заявка оформлена!\n\n"
+                "🎉 Заявка принята!\n\n"
                 "Вот что мы передали менеджеру:\n"
                 "─────────────────────\n"
                 f"📍 Город: {city}\n"
@@ -986,12 +1061,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"{price_line}\n"
                 "─────────────────────\n\n"
                 f"{response_note}\n\n"
-                "Пока ждёте — подпишитесь на канал 👇 Там маршруты по Испании, "
-                "лайфхаки об аренде авто и актуальные цены."
+                "Пока ждёте — в нашем канале маршруты по Испании, "
+                "лайфхаки об аренде и актуальные цены 👇"
             )
+            final_keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📢 Наш канал @weonerent", url="https://t.me/weonerent")],
+                [InlineKeyboardButton("🌐 Сайт WeOneRent", url="https://weonerent.es"),
+                 InlineKeyboardButton("📞 Написать менеджеру", url=get_manager_url())],
+            ])
             track_lead(city)
             await send_lead(update, context, chat_id, ud)
-            await update.message.reply_text(summary, reply_markup=SUBSCRIBE_KEYBOARD)
+            await update.message.reply_text(summary, reply_markup=final_keyboard)
 
         elif step == STEP_DONE:
             # После завершения заявки — возвращаем в меню
