@@ -901,6 +901,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ud["city_key"] = city_key
             ud["step"]     = STEP_DATES
             track_start()
+            track_step("step_dates")
 
             # Напоминание через 2 часа если не завершит
             context.job_queue.run_once(
@@ -936,6 +937,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ud["days_estimate"] = 0
 
             ud["step"] = STEP_CAR
+            track_step("step_car")
             city_key = ud.get("city_key", "")
             prices = PRICES.get(city_key, {})
             ep = prices.get("эконом", 22)
@@ -973,6 +975,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif step == STEP_CAR:
             ud["car"] = text
             ud["step"] = STEP_NAME
+            track_step("step_name")
             # Считаем примерную стоимость из сохранённого days_estimate
             total_hint = ""
             try:
@@ -993,6 +996,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif step == STEP_NAME:
             ud["name"] = text
             ud["step"] = STEP_PHONE
+            track_step("step_phone")
             name_first = text.strip().split()[0] if text.strip() else text
             await update.message.reply_text(
                 f"Почти готово, {name_first}! 🎉\n\n"
@@ -1089,7 +1093,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Отправка лида ──────────────────────────────────────────────
 # ─── Еженедельный отчёт ─────────────────────────────────────────
-weekly_stats = {"leads": 0, "started": 0, "cities": {}}
+weekly_stats = {
+    "leads": 0, "started": 0, "cities": {},
+    "step_dates": 0, "step_car": 0, "step_name": 0, "step_phone": 0,
+}
 
 def track_lead(city: str):
     weekly_stats["leads"] += 1
@@ -1099,13 +1106,22 @@ def track_lead(city: str):
 def track_start():
     weekly_stats["started"] += 1
 
+def track_step(step_name: str):
+    """Трекинг прохождения шага воронки."""
+    if step_name in weekly_stats:
+        weekly_stats[step_name] += 1
+
 async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
     stats = weekly_stats.copy()
-    weekly_stats["leads"]   = 0
-    weekly_stats["started"] = 0
-    weekly_stats["cities"]  = {}
+    weekly_stats["leads"]      = 0
+    weekly_stats["started"]    = 0
+    weekly_stats["cities"]     = {}
+    weekly_stats["step_dates"] = 0
+    weekly_stats["step_car"]   = 0
+    weekly_stats["step_name"]  = 0
+    weekly_stats["step_phone"] = 0
 
-    # Дополняем данными из Google Sheets (более надёжный источник)
+    # Данные из Google Sheets (приоритет)
     sheets_stats = get_sheets_stats_this_week()
     total_leads  = sheets_stats["total"] if sheets_stats["total"] > 0 else stats["leads"]
     cities_data  = sheets_stats["cities"] if sheets_stats["cities"] else stats["cities"]
@@ -1115,28 +1131,41 @@ async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
         sorted(cities_data.items(), key=lambda x: -x[1])
     ) or "  —"
 
-    conversion = (
-        f"{round(total_leads / stats['started'] * 100)}%"
-        if stats["started"] > 0 else "—"
+    # Воронка — считаем drop-off на каждом шаге
+    s  = stats["started"]
+    d  = stats["step_dates"]
+    c  = stats["step_car"]
+    n  = stats["step_name"]
+    p  = stats["step_phone"]
+    l  = stats["leads"]
+
+    def pct(part, whole):
+        return f"{round(part / whole * 100)}%" if whole > 0 else "—"
+
+    funnel_text = (
+        f"  /start → город:    {s} чел.\n"
+        f"  → даты:            {d} ({pct(d, s)} от старта)\n"
+        f"  → тип авто:        {c} ({pct(c, s)} от старта)\n"
+        f"  → имя:             {n} ({pct(n, s)} от старта)\n"
+        f"  → телефон:         {p} ({pct(p, s)} от старта)\n"
+        f"  → заявка готова:   {l} ({pct(l, s)} конверсия)"
     )
 
     sheets_note = (
-        "\n📋 Данные из Google Sheets"
+        "📋 Лиды из Google Sheets"
         if sheets_stats["total"] > 0 else
-        "\n⚠️ Google Sheets не подключён — данные из памяти"
+        "⚠️ Sheets не подключён — данные из памяти"
     )
 
     report = (
         f"📊 Еженедельный отчёт WeOneRent\n"
-        f"{'─' * 25}\n"
-        f"Начали заявку: {stats['started']}\n"
-        f"Завершили заявку: {total_leads}\n"
-        f"Конверсия: {conversion}\n"
-        f"{'─' * 25}\n"
-        f"По городам:\n{cities_text}\n"
-        f"{'─' * 25}\n"
+        f"{'─' * 28}\n"
+        f"🔻 Воронка за неделю:\n{funnel_text}\n"
+        f"{'─' * 28}\n"
+        f"📍 По городам:\n{cities_text}\n"
+        f"{'─' * 28}\n"
+        f"{sheets_note}\n"
         f"Следующий пост: /status"
-        f"{sheets_note}"
     )
     try:
         await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=report)
