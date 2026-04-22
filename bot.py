@@ -517,6 +517,31 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=CITY_KEYBOARD
             )
 
+    elif data.startswith("resume_"):
+        # Возврат по кнопке из напоминания — пробуем восстановить шаг
+        ud = user_data.get(chat_id, {})
+        current_step = ud.get("step")
+
+        if current_step not in (None, STEP_DONE) and current_step is not None:
+            step_prompts = {
+                STEP_CITY:         ("Продолжаем! Выберите город:", CITY_KEYBOARD),
+                STEP_DATES:        ("Продолжаем! На какой срок нужен автомобиль?", DATES_KEYBOARD),
+                STEP_DATES_DETAIL: ("Введите даты или срок аренды.\n\nНапример: с 10 по 17 июля  или  7 дней", REMOVE),
+                STEP_CAR:          ("Продолжаем! Выберите тип автомобиля:", CAR_KEYBOARD),
+                STEP_NAME:         ("Продолжаем! Как вас зовут?\n\nВведите имя и фамилию:", REMOVE),
+                STEP_PHONE:        ("Продолжаем! Отправьте номер телефона или введите вручную:", PHONE_KEYBOARD),
+            }
+            prompt, kb = step_prompts.get(current_step, ("Продолжаем заявку:", CITY_KEYBOARD))
+            await query.message.reply_text(prompt, reply_markup=kb)
+        else:
+            # Данные не сохранились (рестарт бота) — начинаем заново честно
+            user_data[chat_id] = {"step": STEP_CITY}
+            await query.message.reply_text(
+                "К сожалению, данные заявки не сохранились — давайте начнём заново 🙌\n\n"
+                "В каком городе нужен автомобиль?",
+                reply_markup=CITY_KEYBOARD
+            )
+
     elif data == "menu_price":
         user_data[chat_id] = {"step": None}
         await query.message.reply_text(
@@ -855,11 +880,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ud["days_estimate"] = 0
 
             ud["step"] = STEP_CAR
+            city_key = ud.get("city_key", "")
+            prices = PRICES.get(city_key, {})
+            ep = prices.get("эконом", 22)
+            cp = prices.get("комфорт", 35)
+            sp = prices.get("suv", 48)
             await update.message.reply_text(
                 f"✅ Срок: {ud['dates']}\n\nКакой тип автомобиля?\n\n"
-                "🟢 Эконом — Seat Ibiza, VW Polo · 4–5 мест · компактный\n"
-                "🔵 Комфорт — Seat Leon, Skoda Octavia · 5 мест · просторный\n"
-                "🔴 SUV — Seat Ateca, Kia Sportage · 5 мест · высокий клиренс",
+                f"🟢 Эконом — от €{ep}/сутки (Seat Ibiza, VW Polo)\n"
+                f"🔵 Комфорт — от €{cp}/сутки (Seat Leon, Skoda Octavia)\n"
+                f"🔴 SUV — от €{sp}/сутки (Seat Ateca, Kia Sportage)",
                 reply_markup=CAR_KEYBOARD
             )
 
@@ -872,11 +902,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             days = ud["days_estimate"]
             days_text = f"{days} дней" if days else "уточним с менеджером"
 
+            city_key = ud.get("city_key", "")
+            prices = PRICES.get(city_key, {})
+            ep = prices.get("эконом", 22)
+            cp = prices.get("комфорт", 35)
+            sp = prices.get("suv", 48)
             await update.message.reply_text(
                 f"✅ Даты: {text} ({days_text})\n\nКакой тип автомобиля?\n\n"
-                "🟢 Эконом — Seat Ibiza, VW Polo · 4–5 мест · компактный\n"
-                "🔵 Комфорт — Seat Leon, Skoda Octavia · 5 мест · просторный\n"
-                "🔴 SUV — Seat Ateca, Kia Sportage · 5 мест · высокий клиренс",
+                f"🟢 Эконом — от €{ep}/сутки (Seat Ibiza, VW Polo)\n"
+                f"🔵 Комфорт — от €{cp}/сутки (Seat Leon, Skoda Octavia)\n"
+                f"🔴 SUV — от €{sp}/сутки (Seat Ateca, Kia Sportage)",
                 reply_markup=CAR_KEYBOARD
             )
         elif step == STEP_CAR:
@@ -902,10 +937,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif step == STEP_NAME:
             ud["name"] = text
             ud["step"] = STEP_PHONE
+            name_first = text.strip().split()[0] if text.strip() else text
             await update.message.reply_text(
-                "Отлично! Осталось только оставить номер телефона.\n\n"
-                "Нажмите кнопку или введите вручную с кодом страны — например: +34 612 345 678\n\n"
-                f"💬 Или напишите мне напрямую {get_manager_handle()} — разберёмся без формы.",
+                f"Почти готово, {name_first}! 🎉\n\n"
+                "Последний шаг — номер телефона.\n\n"
+                "📞 Менеджер позвонит один раз, чтобы подтвердить детали брони. "
+                "Никакого спама — обещаем.\n\n"
+                f"Если не хотите оставлять номер — напишите напрямую: {get_manager_handle()}",
                 reply_markup=PHONE_KEYBOARD
             )
         elif step == STEP_PHONE:
@@ -1080,7 +1118,7 @@ async def remind_abandoned(context: ContextTypes.DEFAULT_TYPE):
                     "Начать заново — /start"
                 ),
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🚗 Продолжить заявку", callback_data="menu_apply")],
+                    [InlineKeyboardButton("🚗 Продолжить заявку", callback_data=f"resume_{step}")],
                     [InlineKeyboardButton("📞 Написать менеджеру", url=get_manager_url())],
                 ])
             )
@@ -1130,9 +1168,21 @@ async def send_lead(update, context, client_chat_id, ud):
     except Exception as e:
         logger.error(f"Sheets lead error: {e}")
 
+# ─── Уведомление при старте ─────────────────────────────────────
+async def post_init(application):
+    """Отправляет уведомление владельцу при каждом запуске бота."""
+    now = datetime.now(TZ).strftime("%d.%m %H:%M")
+    try:
+        await application.bot.send_message(
+            chat_id=OWNER_CHAT_ID,
+            text=f"✅ Бот WeOneRent запущен\n🕐 {now} (Мадрид)\n🚀 Готов принимать заявки"
+        )
+    except Exception as e:
+        logger.error(f"post_init notify error: {e}")
+
 # ─── Запуск ─────────────────────────────────────────────────────
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     # Планируем все посты при старте
     schedule_all_posts(app)
@@ -1146,7 +1196,7 @@ def main():
     app.add_handler(CommandHandler("price",      price_cmd))
     app.add_handler(CommandHandler("faq",        faq_cmd))
     app.add_handler(CommandHandler("sheetstest", sheetstest_cmd))
-    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_"))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_|^resume_"))
     app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.CONTACT, handle_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
