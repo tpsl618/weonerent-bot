@@ -403,7 +403,8 @@ def parse_days(text: str) -> int:
     return 0
 
 def get_user(chat_id):
-    if chat_id not in user_data:
+    # app.user_data — defaultdict(dict), автоматически создаёт запись
+    if not user_data.get(chat_id):
         user_data[chat_id] = {"step": STEP_CITY}
     return user_data[chat_id]
 
@@ -1418,8 +1419,11 @@ async def daily_heartbeat(context):
 
 # ─── Запуск ─────────────────────────────────────────────────────
 def main():
+    global user_data
     persistence = PicklePersistence(filepath="/data/bot_persistence", update_interval=30)
     app = Application.builder().token(BOT_TOKEN).persistence(persistence).post_init(post_init).build()
+    # Подключаем наш user_data к PTB — теперь PicklePersistence сохраняет его автоматически
+    user_data = app.user_data
 
     # Планируем все посты при старте
     schedule_all_posts(app)
