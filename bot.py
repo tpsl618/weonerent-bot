@@ -1080,6 +1080,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_lead(update, context, chat_id, ud)
             await update.message.reply_text(summary, reply_markup=final_keyboard)
 
+            # Реферальная программа
+            await update.message.reply_text(
+                "🎁 <b>Порекомендуйте нас другу — получите скидку €15</b> на следующую аренду!\n\n"
+                "Поделитесь этим сообщением с другом, который едет в Испанию.\n"
+                "Пусть он назовёт ваш промокод при бронировании:\n\n"
+                f"<code>WOR-{chat_id % 9000 + 1000}</code>\n\n"
+                "Скидка активируется автоматически после его первой аренды 🚗",
+                parse_mode="HTML"
+            )
+
         elif step == STEP_DONE:
             # После завершения заявки — возвращаем в меню
             user_data[chat_id] = {"step": None}
