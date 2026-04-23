@@ -909,6 +909,23 @@ FAQ_TEXT = (
 async def faq_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(FAQ_TEXT, reply_markup=KEYBOARDS["soft"])
 
+async def dashboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет ссылку на Looker Studio дашборд."""
+    if update.effective_chat.id != OWNER_CHAT_ID:
+        return
+    await update.message.reply_text(
+        "📊 <b>WeOneRent Analytics Dashboard</b>\n\n"
+        "🔗 <a href='https://datastudio.google.com/reporting/535b5921-7ac0-42c9-8804-9eb72d953f49'>Открыть дашборд</a>\n\n"
+        "<b>Что смотреть:</b>\n"
+        "• Активные пользователи — сколько людей на сайте\n"
+        "• Сеансы — сколько раз заходили\n"
+        "• График — динамика по дням\n"
+        "• Топ страниц — что смотрят чаще всего\n\n"
+        "<i>Данные обновляются автоматически каждый день.</i>",
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
+
 async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """GDPR — user rights and data processing information."""
     chat_id = update.effective_chat.id
@@ -1350,10 +1367,18 @@ async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
         f"📍 По городам:\n{cities_text}\n"
         f"{'─' * 28}\n"
         f"{sheets_note}\n"
+        f"{'─' * 28}\n"
+        f"🌐 Аналитика сайта:\n"
+        f"  📈 <a href='https://datastudio.google.com/reporting/535b5921-7ac0-42c9-8804-9eb72d953f49'>Открыть дашборд Looker Studio</a>\n\n"
         f"Следующий пост: /status"
     )
     try:
-        await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=report)
+        await context.bot.send_message(
+            chat_id=OWNER_CHAT_ID,
+            text=report,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
     except Exception as e:
         logger.error(f"Weekly report error: {e}")
 
@@ -1621,6 +1646,7 @@ def main():
     app.add_handler(CommandHandler("price",      price_cmd))
     app.add_handler(CommandHandler("faq",        faq_cmd))
     app.add_handler(CommandHandler("privacy",    privacy_cmd))
+    app.add_handler(CommandHandler("dashboard",  dashboard_cmd))
     app.add_handler(CommandHandler("sheetstest", sheetstest_cmd))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_|^resume_"))
     app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
