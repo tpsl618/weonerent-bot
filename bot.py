@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import asyncio
 import requests as _requests
 import pytz
 import threading as _threading_http
@@ -630,15 +631,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"User {chat_id} started bot, source={source}")
 
     if is_new:
-        # Первый запуск — GDPR уведомление (RGPD Art. 13)
+        # First launch — GDPR notice (Art. 13)
         await update.message.reply_text(
-            "👋 <b>Добро пожаловать в WeOneRent!</b>\n\n"
-            "Перед началом — коротко об обработке данных:\n\n"
-            "📋 <b>Что мы собираем:</b> имя, телефон (или Telegram), город и даты аренды.\n"
-            "🎯 <b>Зачем:</b> только для оформления аренды авто. Никакого спама.\n"
-            "🗑 <b>Удаление:</b> напишите на hello@weonerent.es — удалим в течение 30 дней.\n\n"
-            "Продолжая, вы соглашаетесь с нашей "
-            "<a href='https://weonerent.es/privacy-policy'>Политикой конфиденциальности</a>.\n\n"
+            "👋 <b>Welcome to WeOneRent!</b>\n\n"
+            "Before we start — a quick note on your data:\n\n"
+            "📋 <b>What we collect:</b> your name, phone (or Telegram), city and rental dates.\n"
+            "🎯 <b>Why:</b> only to arrange your car rental. No spam, ever.\n"
+            "🗑 <b>Deletion:</b> email hello@weonerent.es and we'll remove your data within 30 days.\n\n"
+            "By continuing you agree to our "
+            "<a href='https://weonerent.es/privacy-policy'>Privacy Policy</a>.\n\n"
             "<i>WeOneRent SL · CIF B22809552 · Alicante, España</i>",
             parse_mode="HTML",
             disable_web_page_preview=True
@@ -909,24 +910,24 @@ async def faq_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(FAQ_TEXT, reply_markup=KEYBOARDS["soft"])
 
 async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """RGPD — права пользователя и информация об обработке данных."""
+    """GDPR — user rights and data processing information."""
     chat_id = update.effective_chat.id
     await update.message.reply_text(
-        "🔒 <b>Ваши данные и ваши права</b>\n\n"
-        "<b>Что мы храним о вас:</b>\n"
-        "• Имя и контакт (телефон или Telegram)\n"
-        "• Город и даты запрошенной аренды\n"
-        "• Ваш Telegram ID для связи\n\n"
-        "<b>Ваши права (RGPD/GDPR):</b>\n"
-        "✅ Получить копию ваших данных\n"
-        "✅ Потребовать исправления\n"
-        "✅ Потребовать удаления («право на забвение»)\n"
-        "✅ Возразить против обработки\n\n"
-        "<b>Как воспользоваться:</b>\n"
-        "Напишите на <a href='mailto:hello@weonerent.es'>hello@weonerent.es</a>\n"
-        "Тема: «RGPD — удаление данных» или «RGPD — копия данных»\n"
-        "Ответим в течение 30 дней.\n\n"
-        "📄 <a href='https://weonerent.es/privacy-policy'>Полная политика конфиденциальности</a>\n\n"
+        "🔒 <b>Your data &amp; your rights</b>\n\n"
+        "<b>What we store about you:</b>\n"
+        "• Name and contact (phone or Telegram)\n"
+        "• City and requested rental dates\n"
+        "• Your Telegram ID for communication\n\n"
+        "<b>Your rights (GDPR):</b>\n"
+        "✅ Access — receive a copy of your data\n"
+        "✅ Rectification — correct inaccurate data\n"
+        "✅ Erasure — request deletion (right to be forgotten)\n"
+        "✅ Objection — object to processing\n\n"
+        "<b>How to exercise your rights:</b>\n"
+        "Email: <a href='mailto:hello@weonerent.es'>hello@weonerent.es</a>\n"
+        "Subject: \"GDPR — delete my data\" or \"GDPR — copy of my data\"\n"
+        "We respond within 30 days.\n\n"
+        "📄 <a href='https://weonerent.es/privacy-policy'>Full Privacy Policy</a>\n\n"
         "<i>WeOneRent SL · CIF B22809552 · Alicante, España</i>",
         parse_mode="HTML",
         disable_web_page_preview=True
@@ -1305,8 +1306,8 @@ async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
     weekly_stats["step_name"]  = 0
     weekly_stats["step_phone"] = 0
 
-    # Данные из Google Sheets (приоритет)
-    sheets_stats = get_sheets_stats_this_week()
+    # Данные из Google Sheets (в отдельном потоке — не блокируем event loop)
+    sheets_stats = await asyncio.to_thread(get_sheets_stats_this_week)
     total_leads  = sheets_stats["total"] if sheets_stats["total"] > 0 else stats["leads"]
     cities_data  = sheets_stats["cities"] if sheets_stats["cities"] else stats["cities"]
 
@@ -1490,9 +1491,9 @@ async def send_lead(update, context, client_chat_id, ud):
     except Exception as e:
         logger.error(f"Ошибка отправки: {e}")
 
-    # Сохраняем в Google Sheets (отдельно, чтобы ошибка Sheets не ломала Telegram)
+    # Сохраняем в Google Sheets (в отдельном потоке — не блокируем event loop)
     try:
-        append_lead_to_sheets(ud, user, client_chat_id, price_est)
+        await asyncio.to_thread(append_lead_to_sheets, ud, user, client_chat_id, price_est)
     except Exception as e:
         logger.error(f"Sheets lead error: {e}")
 
