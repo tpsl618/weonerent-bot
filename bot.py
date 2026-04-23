@@ -4,6 +4,7 @@ import logging
 import asyncio
 import requests as _requests
 import pytz
+import tempfile
 import threading as _threading_http
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
@@ -35,6 +36,10 @@ FB_ACCESS_TOKEN  = os.environ.get("FB_ACCESS_TOKEN", "")   # из Events Manager
 
 MANAGER_FALLBACK    = "weonerent"   # дефолт если ADMIN_USERNAME не задан в env
 GOOGLE_SCRIPT_URL   = os.environ.get("GOOGLE_SCRIPT_URL", "")  # URL Google Apps Script вебхука
+
+# GA4 Data API
+GA4_PROPERTY_ID      = os.environ.get("GA4_PROPERTY_ID", "526373133")
+GA4_CREDENTIALS_JSON = os.environ.get("GA4_CREDENTIALS_JSON", "")  # JSON сервисного аккаунта
 
 def get_manager_url() -> str:
     username = ADMIN_USERNAME or MANAGER_FALLBACK
@@ -910,21 +915,30 @@ async def faq_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(FAQ_TEXT, reply_markup=KEYBOARDS["soft"])
 
 async def dashboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет ссылку на Looker Studio дашборд."""
+    """Показывает живые GA4 данные + ссылку на дашборд."""
     if update.effective_chat.id != OWNER_CHAT_ID:
         return
-    await update.message.reply_text(
-        "📊 <b>WeOneRent Analytics Dashboard</b>\n\n"
-        "🔗 <a href='https://datastudio.google.com/reporting/535b5921-7ac0-42c9-8804-9eb72d953f49'>Открыть дашборд</a>\n\n"
-        "<b>Что смотреть:</b>\n"
-        "• Активные пользователи — сколько людей на сайте\n"
-        "• Сеансы — сколько раз заходили\n"
-        "• График — динамика по дням\n"
-        "• Топ страниц — что смотрят чаще всего\n\n"
-        "<i>Данные обновляются автоматически каждый день.</i>",
-        parse_mode="HTML",
-        disable_web_page_preview=True
-    )
+    await update.message.reply_text("⏳ Загружаю данные из GA4...", parse_mode="HTML")
+    ga4 = await asyncio.to_thread(get_ga4_stats_this_week)
+    if ga4["users"] > 0:
+        text = (
+            f"📊 <b>WeOneRent — Сайт за 7 дней</b>\n"
+            f"{'─' * 28}\n"
+            f"👥 Пользователей: <b>{ga4['users']}</b>\n"
+            f"🔄 Сеансов: <b>{ga4['sessions']}</b>\n"
+            f"🆕 Новых пользователей: <b>{ga4['new_users']}</b>\n"
+            f"📄 Топ страница: <b>{ga4['top_page']}</b>\n"
+            f"{'─' * 28}\n"
+            f"📈 <a href='https://datastudio.google.com/reporting/535b5921-7ac0-42c9-8804-9eb72d953f49'>Полный дашборд Looker Studio</a>"
+        )
+    else:
+        text = (
+            f"📊 <b>WeOneRent Analytics</b>\n\n"
+            f"⚠️ GA4 API ещё не настроен.\n"
+            f"Добавь GA4_CREDENTIALS_JSON в Railway.\n\n"
+            f"📈 <a href='https://datastudio.google.com/reporting/535b5921-7ac0-42c9-8804-9eb72d953f49'>Открыть дашборд Looker Studio</a>"
+        )
+    await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
 async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """GDPR — user rights and data processing information."""
@@ -1313,6 +1327,59 @@ def track_step(step_name: str):
     if step_name in weekly_stats:
         weekly_stats[step_name] += 1
 
+def get_ga4_stats_this_week() -> dict:
+    """Получает данные из GA4 Data API за последние 7 дней."""
+    result = {"users": 0, "sessions": 0, "new_users": 0, "top_page": "—"}
+    if not GA4_CREDENTIALS_JSON:
+        return result
+    try:
+        from google.analytics.data_v1beta import BetaAnalyticsDataClient
+        from google.analytics.data_v1beta.types import (
+            RunReportRequest, DateRange, Metric, Dimension, OrderBy
+        )
+        from google.oauth2 import service_account
+
+        creds_dict = json.loads(GA4_CREDENTIALS_JSON)
+        credentials = service_account.Credentials.from_service_account_info(
+            creds_dict,
+            scopes=["https://www.googleapis.com/auth/analytics.readonly"]
+        )
+        client = BetaAnalyticsDataClient(credentials=credentials)
+
+        # Основные метрики
+        request = RunReportRequest(
+            property=f"properties/{GA4_PROPERTY_ID}",
+            date_ranges=[DateRange(start_date="7daysAgo", end_date="today")],
+            metrics=[
+                Metric(name="activeUsers"),
+                Metric(name="sessions"),
+                Metric(name="newUsers"),
+            ],
+        )
+        response = client.run_report(request)
+        if response.rows:
+            row = response.rows[0]
+            result["users"]     = int(row.metric_values[0].value)
+            result["sessions"]  = int(row.metric_values[1].value)
+            result["new_users"] = int(row.metric_values[2].value)
+
+        # Топ страница
+        req2 = RunReportRequest(
+            property=f"properties/{GA4_PROPERTY_ID}",
+            date_ranges=[DateRange(start_date="7daysAgo", end_date="today")],
+            dimensions=[Dimension(name="pagePath")],
+            metrics=[Metric(name="sessions")],
+            order_bys=[OrderBy(metric=OrderBy.MetricOrderBy(metric_name="sessions"), desc=True)],
+            limit=1,
+        )
+        resp2 = client.run_report(req2)
+        if resp2.rows:
+            result["top_page"] = resp2.rows[0].dimension_values[0].value
+
+    except Exception as e:
+        logger.warning(f"GA4 API error: {e}")
+    return result
+
 async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
     stats = weekly_stats.copy()
     weekly_stats["leads"]      = 0
@@ -1323,8 +1390,11 @@ async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
     weekly_stats["step_name"]  = 0
     weekly_stats["step_phone"] = 0
 
-    # Данные из Google Sheets (в отдельном потоке — не блокируем event loop)
-    sheets_stats = await asyncio.to_thread(get_sheets_stats_this_week)
+    # Данные из Google Sheets и GA4 (в отдельных потоках)
+    sheets_stats, ga4_stats = await asyncio.gather(
+        asyncio.to_thread(get_sheets_stats_this_week),
+        asyncio.to_thread(get_ga4_stats_this_week),
+    )
     total_leads  = sheets_stats["total"] if sheets_stats["total"] > 0 else stats["leads"]
     cities_data  = sheets_stats["cities"] if sheets_stats["cities"] else stats["cities"]
 
@@ -1359,18 +1429,24 @@ async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
         "⚠️ Sheets не подключён — данные из памяти"
     )
 
+    ga4_text = (
+        f"  👥 Пользователей: {ga4_stats['users']}\n"
+        f"  🔄 Сеансов: {ga4_stats['sessions']}\n"
+        f"  🆕 Новых: {ga4_stats['new_users']}\n"
+        f"  📄 Топ страница: {ga4_stats['top_page']}"
+    ) if ga4_stats["users"] > 0 else "  ⚠️ GA4 не настроен"
+
     report = (
         f"📊 Еженедельный отчёт WeOneRent\n"
         f"{'─' * 28}\n"
-        f"🔻 Воронка за неделю:\n{funnel_text}\n"
+        f"🔻 Воронка бота за неделю:\n{funnel_text}\n"
         f"{'─' * 28}\n"
         f"📍 По городам:\n{cities_text}\n"
         f"{'─' * 28}\n"
-        f"{sheets_note}\n"
+        f"🌐 Сайт за 7 дней:\n{ga4_text}\n"
         f"{'─' * 28}\n"
-        f"🌐 Аналитика сайта:\n"
-        f"  📈 <a href='https://datastudio.google.com/reporting/535b5921-7ac0-42c9-8804-9eb72d953f49'>Открыть дашборд Looker Studio</a>\n\n"
-        f"Следующий пост: /status"
+        f"{sheets_note}\n"
+        f"📈 <a href='https://datastudio.google.com/reporting/535b5921-7ac0-42c9-8804-9eb72d953f49'>Дашборд Looker Studio</a>"
     )
     try:
         await context.bot.send_message(
