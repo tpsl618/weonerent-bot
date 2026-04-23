@@ -247,7 +247,7 @@ def send_fb_lead_event(phone: str = "", name: str = "", city: str = "", event_id
     }
 
     try:
-        url = f"https://graph.facebook.com/v19.0/{FB_PIXEL_ID}/events"
+        url = f"https://graph.facebook.com/v21.0/{FB_PIXEL_ID}/events"
         resp = _requests.post(url, json=payload, timeout=10)
         if resp.status_code == 200:
             events_received = resp.json().get("events_received", 0)
@@ -630,12 +630,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"User {chat_id} started bot, source={source}")
 
     if is_new:
-        # Первый запуск — показываем GDPR согласие коротко
+        # Первый запуск — GDPR уведомление (RGPD Art. 13)
         await update.message.reply_text(
-            "👋 Добро пожаловать в WeOneRent!\n\n"
-            "Нажимая «Подобрать авто», вы соглашаетесь с нашей "
-            "<a href='https://weonerent.es/privacy-policy'>политикой конфиденциальности</a> "
-            "и обработкой данных для оформления аренды (GDPR).",
+            "👋 <b>Добро пожаловать в WeOneRent!</b>\n\n"
+            "Перед началом — коротко об обработке данных:\n\n"
+            "📋 <b>Что мы собираем:</b> имя, телефон (или Telegram), город и даты аренды.\n"
+            "🎯 <b>Зачем:</b> только для оформления аренды авто. Никакого спама.\n"
+            "🗑 <b>Удаление:</b> напишите на hello@weonerent.es — удалим в течение 30 дней.\n\n"
+            "Продолжая, вы соглашаетесь с нашей "
+            "<a href='https://weonerent.es/privacy-policy'>Политикой конфиденциальности</a>.\n\n"
+            "<i>WeOneRent SL · CIF B22809552 · Alicante, España</i>",
             parse_mode="HTML",
             disable_web_page_preview=True
         )
@@ -903,6 +907,30 @@ FAQ_TEXT = (
 
 async def faq_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(FAQ_TEXT, reply_markup=KEYBOARDS["soft"])
+
+async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """RGPD — права пользователя и информация об обработке данных."""
+    chat_id = update.effective_chat.id
+    await update.message.reply_text(
+        "🔒 <b>Ваши данные и ваши права</b>\n\n"
+        "<b>Что мы храним о вас:</b>\n"
+        "• Имя и контакт (телефон или Telegram)\n"
+        "• Город и даты запрошенной аренды\n"
+        "• Ваш Telegram ID для связи\n\n"
+        "<b>Ваши права (RGPD/GDPR):</b>\n"
+        "✅ Получить копию ваших данных\n"
+        "✅ Потребовать исправления\n"
+        "✅ Потребовать удаления («право на забвение»)\n"
+        "✅ Возразить против обработки\n\n"
+        "<b>Как воспользоваться:</b>\n"
+        "Напишите на <a href='mailto:hello@weonerent.es'>hello@weonerent.es</a>\n"
+        "Тема: «RGPD — удаление данных» или «RGPD — копия данных»\n"
+        "Ответим в течение 30 дней.\n\n"
+        "📄 <a href='https://weonerent.es/privacy-policy'>Полная политика конфиденциальности</a>\n\n"
+        "<i>WeOneRent SL · CIF B22809552 · Alicante, España</i>",
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
 
 async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Быстрый расчёт цены: /price Барселона SUV 7"""
@@ -1591,6 +1619,7 @@ def main():
     app.add_handler(CommandHandler("cancel",     cancel_cmd))
     app.add_handler(CommandHandler("price",      price_cmd))
     app.add_handler(CommandHandler("faq",        faq_cmd))
+    app.add_handler(CommandHandler("privacy",    privacy_cmd))
     app.add_handler(CommandHandler("sheetstest", sheetstest_cmd))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_|^resume_"))
     app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
