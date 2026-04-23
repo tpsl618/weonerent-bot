@@ -1541,7 +1541,7 @@ def main():
         builder = builder.persistence(persistence)
     app = builder.build()
     # Подключаем наш user_data к PTB — теперь PicklePersistence сохраняет его автоматически
-    user_data = app.user_data
+    user_data = app._user_data  # mutable internal dict (app.user_data — read-only proxy)
 
     # Планируем все посты при старте
     schedule_all_posts(app)
