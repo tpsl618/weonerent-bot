@@ -11,7 +11,8 @@ from telegram import (
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ChatMemberHandler, filters, ContextTypes
+    CallbackQueryHandler, ChatMemberHandler, filters, ContextTypes,
+    PicklePersistence
 )
 from telegram.constants import ChatMemberStatus
 from datetime import time as dtime
@@ -1291,7 +1292,8 @@ async def post_init(application):
 
 # ─── Запуск ─────────────────────────────────────────────────────
 def main():
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    persistence = PicklePersistence(filepath="/data/bot_persistence", update_interval=30)
+    app = Application.builder().token(BOT_TOKEN).persistence(persistence).post_init(post_init).build()
 
     # Планируем все посты при старте
     schedule_all_posts(app)
