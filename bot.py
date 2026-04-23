@@ -571,35 +571,34 @@ def schedule_all_posts(app):
             count += 1
 
     # Еженедельный отчёт — каждый понедельник в 08:00 по Мадриду
-    app.job_queue.run_repeating(
-        send_weekly_report,
-        interval=60 * 60 * 24 * 7,
-        first=dtime(8, 0, tzinfo=TZ),
-        name="weekly_report",
-    )
+    if not app.job_queue.get_jobs_by_name("weekly_report"):
+        app.job_queue.run_repeating(
+            send_weekly_report,
+            interval=60 * 60 * 24 * 7,
+            first=dtime(8, 0, tzinfo=TZ),
+            name="weekly_report",
+        )
 
     # Вечная ротация лайфхаков — каждый пн 09:30 и чт 19:30 по Мадриду
     # Запускается начиная с 23 июня (после окончания основного расписания)
     rotation_start = TZ.localize(datetime(2026, 6, 23, 0, 0))
-    if now < rotation_start:
-        delay = (rotation_start - now).total_seconds()
-    else:
-        delay = 0
 
-    app.job_queue.run_repeating(
-        publish_lifehack,
-        interval=60 * 60 * 24 * 7 / 2,   # дважды в неделю (каждые 3.5 дня)
-        first=rotation_start if now < rotation_start else now,
-        name="lifehack_rotation",
-    )
+    if not app.job_queue.get_jobs_by_name("lifehack_rotation"):
+        app.job_queue.run_repeating(
+            publish_lifehack,
+            interval=60 * 60 * 24 * 7 / 2,   # дважды в неделю (каждые 3.5 дня)
+            first=rotation_start if now < rotation_start else now,
+            name="lifehack_rotation",
+        )
 
     # Retry неотправленных лидов — каждые 10 минут
-    app.job_queue.run_repeating(
-        flush_failed_leads,
-        interval=60 * 10,
-        first=60,
-        name="flush_leads",
-    )
+    if not app.job_queue.get_jobs_by_name("flush_leads"):
+        app.job_queue.run_repeating(
+            flush_failed_leads,
+            interval=60 * 10,
+            first=60,
+            name="flush_leads",
+        )
 
     logger.info(f"Запланировано {count} постов + вечная ротация лайфхаков")
     return count
@@ -804,8 +803,11 @@ async def post_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    user_data[chat_id] = {"step": STEP_CITY}
-    await update.message.reply_text("Отменено.", reply_markup=REMOVE)
+    user_data[chat_id] = {"step": None}
+    await update.message.reply_text(
+        "Отменено. Чем могу помочь?",
+        reply_markup=build_main_menu()
+    )
 
 async def sheetstest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Диагностика подключения к Google Sheets — только для админа."""
@@ -1334,7 +1336,8 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def followup_after_lead(context: ContextTypes.DEFAULT_TYPE):
     """Follow-up через 2 часа после отправки заявки."""
     chat_id = context.job.data["chat_id"]
-    name    = context.job.data.get("name", "").split()[0] or "Привет"
+    _name_parts = context.job.data.get("name", "").split()
+    name = _name_parts[0] if _name_parts else "Привет"
     ud      = user_data.get(chat_id, {})
 
     # Не отправляем если уже идёт новая заявка
@@ -1487,7 +1490,7 @@ def start_health_server():
 async def daily_heartbeat(context):
     """Каждый день в 10:00 по Мадриду шлёт отчёт владельцу."""
     now = datetime.now(TZ)
-    uptime_hours = round((now - datetime.fromisoformat(_bot_started_at.replace(".", "-").replace(" ", "T") + ":00")).total_seconds() / 3600) if False else "—"
+    uptime_hours = "—"
     leads_today = weekly_stats.get("leads", 0)
     started_today = weekly_stats.get("started", 0)
 
@@ -1512,6 +1515,7 @@ async def daily_heartbeat(context):
 def _build_persistence() -> PicklePersistence:
     """Создаёт PicklePersistence. При повреждённом файле — удаляет и создаёт заново."""
     pickle_path = "/data/bot_persistence"
+    os.makedirs("/data", exist_ok=True)   # создаём /data если нет
     for attempt in range(2):
         try:
             p = PicklePersistence(filepath=pickle_path, update_interval=30)
