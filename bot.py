@@ -3,6 +3,8 @@ import json
 import logging
 import requests as _requests
 import pytz
+import threading as _threading_http
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from telegram import (
     Update,
@@ -1290,6 +1292,38 @@ async def post_init(application):
     except Exception as e:
         logger.error(f"post_init notify error: {e}")
 
+# ─── Health Check HTTP сервер ────────────────────────────────────
+_bot_started_at = datetime.now(pytz.timezone("Europe/Madrid")).strftime("%d.%m %H:%M")
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            body = json.dumps({
+                "status": "ok",
+                "bot": "WeOneRent",
+                "started": _bot_started_at
+            }).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        pass  # не спамить логи
+
+def _run_health_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    logger.info(f"Health check сервер запущен на порту {port}")
+    server.serve_forever()
+
+def start_health_server():
+    t = _threading_http.Thread(target=_run_health_server, daemon=True)
+    t.start()
+
 # ─── Запуск ─────────────────────────────────────────────────────
 def main():
     persistence = PicklePersistence(filepath="/data/bot_persistence", update_interval=30)
@@ -1311,6 +1345,7 @@ def main():
     app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.CONTACT, handle_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    start_health_server()
     logger.info("Бот запущен. Автопостинг активен.")
     app.run_polling(drop_pending_updates=True)
 
