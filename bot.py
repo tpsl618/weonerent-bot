@@ -39,6 +39,17 @@ def get_manager_handle() -> str:
     username = ADMIN_USERNAME or MANAGER_FALLBACK
     return f"@{username}"
 
+# ─── UTM-метки ───────────────────────────────────────────────────
+SITE_URL      = "https://weonerent.es"
+UTM_BOT       = "?utm_source=telegram&utm_medium=bot&utm_campaign=weonerent_bot"
+UTM_FINAL     = "?utm_source=telegram&utm_medium=bot&utm_campaign=weonerent_bot&utm_content=final"
+UTM_FAQ       = "?utm_source=telegram&utm_medium=bot&utm_campaign=weonerent_bot&utm_content=faq"
+UTM_PRICE     = "?utm_source=telegram&utm_medium=bot&utm_campaign=weonerent_bot&utm_content=price"
+UTM_FOLLOWUP  = "?utm_source=telegram&utm_medium=bot&utm_campaign=weonerent_bot&utm_content=followup"
+
+def site_url(utm: str = UTM_BOT) -> str:
+    return SITE_URL + utm
+
 TZ = pytz.timezone("Europe/Madrid")
 
 logging.basicConfig(level=logging.INFO)
@@ -118,7 +129,7 @@ REMOVE = ReplyKeyboardRemove()
 # ─── Inline кнопки ──────────────────────────────────────────────
 SUBSCRIBE_KEYBOARD = InlineKeyboardMarkup([
     [InlineKeyboardButton("📢 Наш канал", url="https://t.me/weonerent"),
-     InlineKeyboardButton("🌐 Сайт", url="https://weonerent.es")]
+     InlineKeyboardButton("🌐 Сайт", url=site_url())]
 ])
 
 # ─── Главное меню (строится динамически, чтобы URL менеджера всегда актуален) ──
@@ -135,15 +146,15 @@ MAIN_MENU = build_main_menu()   # статическая копия — обно
 KEYBOARDS = {
     "full": InlineKeyboardMarkup([
         [InlineKeyboardButton("✈️ Оставить заявку", url="https://t.me/weonerent_ai_bot")],
-        [InlineKeyboardButton("🌐 Наш сайт", url="https://weonerent.es")]
+        [InlineKeyboardButton("🌐 Наш сайт", url=site_url())]
     ]),
     "soft": InlineKeyboardMarkup([
         [InlineKeyboardButton("💬 Узнать стоимость", url="https://t.me/weonerent_ai_bot"),
-         InlineKeyboardButton("🌐 Сайт", url="https://weonerent.es")]
+         InlineKeyboardButton("🌐 Сайт", url=site_url())]
     ]),
     "promo": InlineKeyboardMarkup([
         [InlineKeyboardButton("🔥 Забронировать сейчас", url="https://t.me/weonerent_ai_bot")],
-        [InlineKeyboardButton("📋 Подробнее на сайте", url="https://weonerent.es")]
+        [InlineKeyboardButton("📋 Подробнее на сайте", url=site_url(UTM_FAQ))]
     ]),
 }
 
@@ -195,6 +206,7 @@ def append_lead_to_sheets(ud: dict, user, chat_id: int, price_est: str = ""):
         "telegram": username,
         "chat_id":  str(chat_id),
         "status":   "Новый",
+        "source":   ud.get("source", "organic"),
     }
     if _post_to_sheets_with_retry(payload):
         logger.info(f"Lead saved to Sheets: {ud.get('name')} / {ud.get('city')}")
@@ -533,7 +545,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ud = user_data.get(chat_id, {})
     is_new = not ud.get("gdpr_accepted")
 
-    user_data[chat_id] = {"step": None, "gdpr_accepted": True}
+    # Трекинг источника: /start fb_ads → source="fb_ads"
+    source = context.args[0] if context.args else ud.get("source", "organic")
+    user_data[chat_id] = {"step": None, "gdpr_accepted": True, "source": source}
+    logger.info(f"User {chat_id} started bot, source={source}")
 
     if is_new:
         # Первый запуск — показываем GDPR согласие коротко
@@ -1089,7 +1104,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             final_keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📢 Наш канал @weonerent", url="https://t.me/weonerent")],
-                [InlineKeyboardButton("🌐 Сайт WeOneRent", url="https://weonerent.es"),
+                [InlineKeyboardButton("🌐 Сайт WeOneRent", url=site_url(UTM_FINAL)),
                  InlineKeyboardButton("📞 Написать менеджеру", url=get_manager_url())],
             ])
             track_lead(city)
@@ -1268,7 +1283,7 @@ async def followup_after_lead(context: ContextTypes.DEFAULT_TYPE):
             text=text,
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("📞 Написать менеджеру", url=get_manager_url())],
-                [InlineKeyboardButton("🌐 Сайт WeOneRent", url="https://weonerent.es")],
+                [InlineKeyboardButton("🌐 Сайт WeOneRent", url=site_url(UTM_FOLLOWUP))],
             ])
         )
     except Exception as e:
