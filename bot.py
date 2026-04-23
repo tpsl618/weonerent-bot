@@ -1324,6 +1324,31 @@ def start_health_server():
     t = _threading_http.Thread(target=_run_health_server, daemon=True)
     t.start()
 
+# ─── Ежедневный heartbeat ────────────────────────────────────────
+async def daily_heartbeat(context):
+    """Каждый день в 10:00 по Мадриду шлёт отчёт владельцу."""
+    now = datetime.now(TZ)
+    uptime_hours = round((now - datetime.fromisoformat(_bot_started_at.replace(".", "-").replace(" ", "T") + ":00")).total_seconds() / 3600) if False else "—"
+    leads_today = weekly_stats.get("leads", 0)
+    started_today = weekly_stats.get("started", 0)
+
+    text = (
+        f"✅ <b>Бот WeOneRent работает</b>\n"
+        f"🕐 {now.strftime('%d.%m %H:%M')} (Мадрид)\n\n"
+        f"📊 Сегодня:\n"
+        f"  • Начали заявку: {started_today}\n"
+        f"  • Заявок готово: {leads_today}\n\n"
+        f"🟢 Всё в порядке"
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=OWNER_CHAT_ID,
+            text=text,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Heartbeat error: {e}")
+
 # ─── Запуск ─────────────────────────────────────────────────────
 def main():
     persistence = PicklePersistence(filepath="/data/bot_persistence", update_interval=30)
@@ -1331,6 +1356,13 @@ def main():
 
     # Планируем все посты при старте
     schedule_all_posts(app)
+
+    # Ежедневный heartbeat в 10:00 по Мадриду
+    app.job_queue.run_daily(
+        daily_heartbeat,
+        time=dtime(hour=10, minute=0, tzinfo=TZ),
+        name="daily_heartbeat"
+    )
 
     app.add_handler(CommandHandler("start",   start))
     app.add_handler(CommandHandler("reset",   reset))
