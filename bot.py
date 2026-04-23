@@ -529,7 +529,22 @@ def get_welcome_text() -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    user_data[chat_id] = {"step": None}   # ждём выбора в меню
+    ud = user_data.get(chat_id, {})
+    is_new = not ud.get("gdpr_accepted")
+
+    user_data[chat_id] = {"step": None, "gdpr_accepted": True}
+
+    if is_new:
+        # Первый запуск — показываем GDPR согласие коротко
+        await update.message.reply_text(
+            "👋 Добро пожаловать в WeOneRent!\n\n"
+            "Нажимая «Подобрать авто», вы соглашаетесь с нашей "
+            "<a href='https://weonerent.es/privacy-policy'>политикой конфиденциальности</a> "
+            "и обработкой данных для оформления аренды (GDPR).",
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+
     await update.message.reply_text(
         get_welcome_text(),
         reply_markup=build_main_menu()
@@ -1090,6 +1105,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML"
             )
 
+            # Follow-up через 2 часа если менеджер не позвонил
+            context.job_queue.run_once(
+                followup_after_lead,
+                when=60 * 60 * 2,
+                data={"chat_id": chat_id, "name": name},
+                name=f"followup_{chat_id}",
+            )
+
         elif step == STEP_DONE:
             # После завершения заявки — возвращаем в меню
             user_data[chat_id] = {"step": None}
@@ -1215,6 +1238,40 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton("📢 Канал @weonerent", url="https://t.me/weonerent")],
         ])
     )
+
+async def followup_after_lead(context: ContextTypes.DEFAULT_TYPE):
+    """Follow-up через 2 часа после отправки заявки."""
+    chat_id = context.job.data["chat_id"]
+    name    = context.job.data.get("name", "").split()[0] or "Привет"
+    ud      = user_data.get(chat_id, {})
+
+    # Не отправляем если уже идёт новая заявка
+    if ud.get("step") not in (STEP_DONE, None):
+        return
+
+    if is_working_hours():
+        text = (
+            f"{name}, менеджер уже обрабатывает вашу заявку! 🚗\n\n"
+            "Если не получили звонок — напишите напрямую, ответим сразу:"
+        )
+    else:
+        text = (
+            f"{name}, ваша заявка принята и ждёт менеджера.\n\n"
+            "Сейчас нерабочее время (9:00–20:00 по Мадриду).\n"
+            "Менеджер свяжется утром — или напишите сами:"
+        )
+
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📞 Написать менеджеру", url=get_manager_url())],
+                [InlineKeyboardButton("🌐 Сайт WeOneRent", url="https://weonerent.es")],
+            ])
+        )
+    except Exception as e:
+        logger.error(f"followup_after_lead error: {e}")
 
 async def remind_abandoned(context: ContextTypes.DEFAULT_TYPE):
     """Напоминание если человек остановился на середине заявки"""
