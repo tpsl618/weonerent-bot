@@ -1523,10 +1523,19 @@ async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Weekly report error: {e}")
 
+async def delete_message_job(context: ContextTypes.DEFAULT_TYPE):
+    """Удаляет сообщение по таймеру."""
+    try:
+        await context.bot.delete_message(
+            chat_id=context.job.data["chat_id"],
+            message_id=context.job.data["message_id"],
+        )
+    except Exception:
+        pass  # сообщение уже удалено или нет прав — игнорируем
+
 async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Приветствие новых участников группы обсуждения"""
+    """Приветствие новых участников группы обсуждения — исчезает через 60 сек."""
     result = update.chat_member
-    # Только когда статус меняется на "участник" (не бот, не повторный вход)
     old_status = result.old_chat_member.status
     new_status = result.new_chat_member.status
     user       = result.new_chat_member.user
@@ -1539,7 +1548,7 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     name = user.first_name or "Привет"
-    await context.bot.send_message(
+    msg = await context.bot.send_message(
         chat_id=result.chat.id,
         text=(
             f"👋 {name}, добро пожаловать в чат WeOneRent!\n\n"
@@ -1552,6 +1561,12 @@ async def welcome_new_member(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton("✈️ Оставить заявку", url="https://t.me/weonerent_ai_bot")],
             [InlineKeyboardButton("📢 Канал @weonerent", url="https://t.me/weonerent")],
         ])
+    )
+    # Удаляем приветствие через 60 секунд
+    context.job_queue.run_once(
+        delete_message_job,
+        when=60,
+        data={"chat_id": result.chat.id, "message_id": msg.message_id},
     )
 
 async def followup_after_lead(context: ContextTypes.DEFAULT_TYPE):
