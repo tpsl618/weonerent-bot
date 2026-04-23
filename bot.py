@@ -1566,9 +1566,26 @@ def main():
     app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.CONTACT, handle_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    # ─── Error handler — логирует ВСЕ ошибки хендлеров ───────────
+    async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        logger.error(f"PTB error: {context.error}", exc_info=context.error)
+        try:
+            # Уведомляем владельца об ошибке
+            await context.bot.send_message(
+                chat_id=OWNER_CHAT_ID,
+                text=f"⚠️ Ошибка бота:\n<code>{context.error}</code>",
+                parse_mode="HTML"
+            )
+        except Exception:
+            pass
+
+    app.add_error_handler(error_handler)
+
     start_health_server()
     logger.info("Бот запущен. Автопостинг активен.")
-    app.run_polling(drop_pending_updates=True)
+    # drop_pending_updates=False — не теряем команды при рестарте
+    app.run_polling(drop_pending_updates=False, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
