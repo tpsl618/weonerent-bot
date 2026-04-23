@@ -125,9 +125,13 @@ CAR_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True, one_time_keyboard=True
 )
 PHONE_KEYBOARD = ReplyKeyboardMarkup(
-    [[KeyboardButton("Отправить мой номер", request_contact=True)]],
+    [
+        [KeyboardButton("📱 Отправить мой номер", request_contact=True)],
+        [KeyboardButton("💬 Напишу сам — без звонка")],
+    ],
     resize_keyboard=True, one_time_keyboard=True
 )
+TELEGRAM_CONTACT_MARKER = "💬 Напишу сам — без звонка"
 REMOVE = ReplyKeyboardRemove()
 
 # ─── Inline кнопки ──────────────────────────────────────────────
@@ -1112,19 +1116,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             name_first = text.strip().split()[0] if text.strip() else text
             await update.message.reply_text(
                 f"Почти готово, {name_first}! 🎉\n\n"
-                "Последний шаг — номер телефона.\n\n"
-                "📞 Менеджер позвонит один раз, чтобы подтвердить детали брони. "
-                "Никакого спама — обещаем.\n\n"
-                f"Если не хотите оставлять номер — напишите напрямую: {get_manager_handle()}",
+                "Последний шаг — как вам удобнее получить подтверждение?\n\n"
+                "📞 <b>Телефон</b> — менеджер позвонит один раз, чтобы подтвердить детали. Никакого спама.\n\n"
+                "💬 <b>Без звонка</b> — менеджер напишет вам прямо здесь, в Telegram.",
+                parse_mode="HTML",
                 reply_markup=PHONE_KEYBOARD
             )
         elif step == STEP_PHONE:
-            # Валидация номера (пропускаем если пришёл контакт — уже проверен)
-            if not update.message.contact and not is_valid_phone(text):
+            # Пользователь выбрал "Без звонка" — используем Telegram как контакт
+            telegram_no_call = (text == TELEGRAM_CONTACT_MARKER)
+            if telegram_no_call:
+                user = update.effective_user
+                tg_handle = f"@{user.username}" if user.username else f"tg://user?id={chat_id}"
+                phone_value = f"Telegram: {tg_handle}"
+            else:
+                phone_value = None
+
+            # Валидация номера (пропускаем если пришёл контакт или выбрал "без звонка")
+            if not telegram_no_call and not update.message.contact and not is_valid_phone(text):
                 await update.message.reply_text(
                     "Не похоже на номер телефона 🙈\n\n"
                     "Введите с кодом страны, например:\n"
-                    "+34 612 345 678  или  +7 999 123 45 67",
+                    "+34 612 345 678  или  +7 999 123 45 67\n\n"
+                    "Или нажмите «💬 Напишу сам» — менеджер напишет вам в Telegram.",
                     reply_markup=PHONE_KEYBOARD
                 )
                 return
@@ -1137,7 +1151,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            ud["phone"] = text
+            ud["phone"] = phone_value if phone_value else text
             ud["step"]  = STEP_DONE
             ud["lead_sent"] = True
 
@@ -1160,10 +1174,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
 
+            # Разный текст в зависимости от способа связи
+            is_tg_contact = phone.startswith("Telegram:")
             if is_working_hours():
-                response_note = "Менеджер свяжется с вами в течение 5 минут."
+                if is_tg_contact:
+                    response_note = "Менеджер напишет вам здесь в Telegram в течение 5 минут."
+                else:
+                    response_note = "Менеджер позвонит вам в течение 5 минут."
             else:
-                response_note = "Менеджер ответит по возможности — сейчас нерабочее время (9:00–20:00 по Мадриду)."
+                if is_tg_contact:
+                    response_note = "Менеджер напишет вам в Telegram — сейчас нерабочее время (9:00–20:00 по Мадриду)."
+                else:
+                    response_note = "Менеджер позвонит в рабочее время (9:00–20:00 по Мадриду)."
+
+            # Строка контакта в сводке
+            contact_label = "💬 Telegram" if is_tg_contact else "📞 Телефон"
+            contact_value = phone.replace("Telegram: ", "") if is_tg_contact else phone
 
             summary = (
                 "🎉 Заявка принята!\n\n"
@@ -1173,7 +1199,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📅 Срок: {dates}\n"
                 f"🚗 Автомобиль: {car}\n"
                 f"👤 Имя: {name}\n"
-                f"📞 Телефон: {phone}"
+                f"{contact_label}: {contact_value}"
                 f"{price_line}\n"
                 "─────────────────────\n\n"
                 f"{response_note}\n\n"
@@ -1183,7 +1209,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             final_keyboard = InlineKeyboardMarkup([
                 [InlineKeyboardButton("📢 Наш канал @weonerent", url="https://t.me/weonerent")],
                 [InlineKeyboardButton("🌐 Сайт WeOneRent", url=site_url(UTM_FINAL)),
-                 InlineKeyboardButton("📞 Написать менеджеру", url=get_manager_url())],
+                 InlineKeyboardButton("💬 Написать менеджеру", url=get_manager_url())],
             ])
             track_lead(city)
             await send_lead(update, context, chat_id, ud)
