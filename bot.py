@@ -28,6 +28,10 @@ CHANNEL_ID        = os.environ.get("CHANNEL_ID", "@weonerent")
 DISCUSSION_GROUP  = os.environ.get("DISCUSSION_GROUP", "")   # ID группы обсуждения
 ADMIN_USERNAME    = os.environ.get("ADMIN_USERNAME", "")   # Telegram username без @
 
+# ─── Facebook Conversions API ────────────────────────────────────
+FB_PIXEL_ID      = os.environ.get("FB_PIXEL_ID", "787631537198771")
+FB_ACCESS_TOKEN  = os.environ.get("FB_ACCESS_TOKEN", "")   # из Events Manager → Настройки
+
 MANAGER_FALLBACK    = "weonerent"   # дефолт если ADMIN_USERNAME не задан в env
 GOOGLE_SCRIPT_URL   = os.environ.get("GOOGLE_SCRIPT_URL", "")  # URL Google Apps Script вебхука
 
@@ -190,6 +194,65 @@ def _post_to_sheets_with_retry(payload: dict, max_attempts: int = 3) -> bool:
             _time.sleep(2 ** attempt)   # 1s → 2s перед следующей попыткой
     return False
 
+def _sha256(value: str) -> str:
+    """SHA-256 хеш строки (нижний регистр, без пробелов) — требование FB."""
+    import hashlib
+    return hashlib.sha256(value.strip().lower().encode()).hexdigest()
+
+def send_fb_lead_event(phone: str = "", name: str = "", city: str = "", event_id: str = ""):
+    """
+    Отправляет серверное событие Lead в Facebook Conversions API.
+    Документация: https://developers.facebook.com/docs/marketing-api/conversions-api
+    """
+    if not FB_ACCESS_TOKEN:
+        logger.debug("FB_ACCESS_TOKEN не задан — пропускаем Conversions API")
+        return
+
+    import time as _time
+
+    # Нормализация телефона: только цифры, добавить 7 если 10 цифр (RU)
+    phone_clean = "".join(c for c in phone if c.isdigit())
+    if len(phone_clean) == 10:
+        phone_clean = "7" + phone_clean  # российский формат
+
+    # Собираем user_data (только заполненные поля)
+    user_data_fb: dict = {}
+    if phone_clean:
+        user_data_fb["ph"] = [_sha256(phone_clean)]
+    if name:
+        parts = name.strip().split(maxsplit=1)
+        user_data_fb["fn"] = [_sha256(parts[0])]
+        if len(parts) > 1:
+            user_data_fb["ln"] = [_sha256(parts[1])]
+
+    payload = {
+        "data": [{
+            "event_name":       "Lead",
+            "event_time":       int(_time.time()),
+            "event_id":         event_id or f"bot_lead_{int(_time.time())}",
+            "event_source_url": "https://t.me/weonerent_ai_bot",
+            "action_source":    "other",            # бот ≠ сайт
+            "user_data":        user_data_fb,
+            "custom_data": {
+                "city":     city,
+                "currency": "EUR",
+                "content_name": "Telegram Bot Lead",
+            },
+        }],
+        "access_token": FB_ACCESS_TOKEN,
+    }
+
+    try:
+        url = f"https://graph.facebook.com/v19.0/{FB_PIXEL_ID}/events"
+        resp = _requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            events_received = resp.json().get("events_received", 0)
+            logger.info(f"FB Conversions API: Lead отправлен, events_received={events_received}")
+        else:
+            logger.warning(f"FB Conversions API error {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        logger.error(f"FB Conversions API exception: {e}")
+
 def append_lead_to_sheets(ud: dict, user, chat_id: int, price_est: str = ""):
     """Отправляет лид в Google Sheets. При неудаче — кладёт в очередь retry."""
     if not GOOGLE_SCRIPT_URL:
@@ -214,6 +277,19 @@ def append_lead_to_sheets(ud: dict, user, chat_id: int, price_est: str = ""):
         logger.error(f"Sheets: все попытки исчерпаны, лид в очереди retry")
         with _queue_lock:
             _failed_leads_queue.append(payload)
+
+    # ─── Facebook Conversions API (серверный пиксель) ───────────
+    import threading as _fb_thread
+    _fb_thread.Thread(
+        target=send_fb_lead_event,
+        kwargs={
+            "phone":    ud.get("phone", ""),
+            "name":     ud.get("name", ""),
+            "city":     ud.get("city", ""),
+            "event_id": f"lead_{chat_id}_{int(__import__('time').time())}",
+        },
+        daemon=True,
+    ).start()
 
 async def flush_failed_leads(context: ContextTypes.DEFAULT_TYPE):
     """Job: каждые 10 минут повторяет попытку отправить неудавшиеся лиды."""
@@ -1433,10 +1509,37 @@ async def daily_heartbeat(context):
         logger.error(f"Heartbeat error: {e}")
 
 # ─── Запуск ─────────────────────────────────────────────────────
+def _build_persistence() -> PicklePersistence:
+    """Создаёт PicklePersistence. При повреждённом файле — удаляет и создаёт заново."""
+    pickle_path = "/data/bot_persistence"
+    for attempt in range(2):
+        try:
+            p = PicklePersistence(filepath=pickle_path, update_interval=30)
+            logger.info(f"PicklePersistence загружен: {pickle_path}")
+            return p
+        except Exception as e:
+            logger.error(f"PicklePersistence попытка {attempt+1} не удалась: {e}")
+            if attempt == 0:
+                # Удаляем повреждённый файл и пробуем снова
+                for suffix in ["", ".pkl", ".db", "-conversations", "-user_data", "-chat_data", "-bot_data"]:
+                    try:
+                        os.remove(pickle_path + suffix)
+                        logger.warning(f"Удалён повреждённый файл: {pickle_path + suffix}")
+                    except FileNotFoundError:
+                        pass
+                    except Exception as ex:
+                        logger.warning(f"Не удалось удалить {pickle_path + suffix}: {ex}")
+    # Финальный фоллбэк — in-memory (без персистентности)
+    logger.warning("PicklePersistence недоступен — работаем без сохранения сессий")
+    return None
+
 def main():
     global user_data
-    persistence = PicklePersistence(filepath="/data/bot_persistence", update_interval=30)
-    app = Application.builder().token(BOT_TOKEN).persistence(persistence).post_init(post_init).build()
+    persistence = _build_persistence()
+    builder = Application.builder().token(BOT_TOKEN).post_init(post_init)
+    if persistence:
+        builder = builder.persistence(persistence)
+    app = builder.build()
     # Подключаем наш user_data к PTB — теперь PicklePersistence сохраняет его автоматически
     user_data = app.user_data
 
