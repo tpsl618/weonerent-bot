@@ -28,7 +28,7 @@ CHANNEL_ID        = os.environ.get("CHANNEL_ID", "@weonerent")
 DISCUSSION_GROUP  = os.environ.get("DISCUSSION_GROUP", "")   # ID группы обсуждения
 ADMIN_USERNAME    = os.environ.get("ADMIN_USERNAME", "")   # Telegram username без @
 
-MANAGER_FALLBACK    = "fake_smm"   # дефолт если ADMIN_USERNAME не задан в env
+MANAGER_FALLBACK    = "weonerent"   # дефолт если ADMIN_USERNAME не задан в env
 GOOGLE_SCRIPT_URL   = os.environ.get("GOOGLE_SCRIPT_URL", "")  # URL Google Apps Script вебхука
 
 def get_manager_url() -> str:
@@ -288,7 +288,7 @@ def calc_price(city_raw: str, car_raw: str, days: int):
     city = CITY_ALIASES.get(city, city)
     car  = CAR_ALIASES.get(car, car)
     if city not in PRICES:
-        return None, None, None
+        return None, None
     if car not in PRICES[city]:
         car = "эконом"
     base  = PRICES[city][car]
