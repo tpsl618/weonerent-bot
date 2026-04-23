@@ -940,6 +940,71 @@ async def dashboard_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     await update.message.reply_text(text, parse_mode="HTML", disable_web_page_preview=True)
 
+async def testreport_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Тестовый запуск еженедельного отчёта (только для владельца)."""
+    if update.effective_chat.id != OWNER_CHAT_ID:
+        return
+    await update.message.reply_text("⏳ Генерирую тестовый отчёт...", parse_mode="HTML")
+
+    sheets_stats, ga4_stats = await asyncio.gather(
+        asyncio.to_thread(get_sheets_stats_this_week),
+        asyncio.to_thread(get_ga4_stats_this_week),
+    )
+    stats = weekly_stats.copy()
+    total_leads = sheets_stats["total"] if sheets_stats["total"] > 0 else stats["leads"]
+    cities_data = sheets_stats["cities"] if sheets_stats["cities"] else stats["cities"]
+
+    cities_text = "\n".join(
+        f"  {c.capitalize()}: {n}" for c, n in
+        sorted(cities_data.items(), key=lambda x: -x[1])
+    ) or "  —"
+
+    s = stats["started"]
+    d = stats["step_dates"]
+    c = stats["step_car"]
+    n = stats["step_name"]
+    p = stats["step_phone"]
+    l = stats["leads"]
+
+    def pct(part, whole):
+        return f"{round(part / whole * 100)}%" if whole > 0 else "—"
+
+    funnel_text = (
+        f"  /start → город:    {s} чел.\n"
+        f"  → даты:            {d} ({pct(d, s)} от старта)\n"
+        f"  → тип авто:        {c} ({pct(c, s)} от старта)\n"
+        f"  → имя:             {n} ({pct(n, s)} от старта)\n"
+        f"  → телефон:         {p} ({pct(p, s)} от старта)\n"
+        f"  → заявка готова:   {l} ({pct(l, s)} конверсия)"
+    )
+
+    sheets_note = (
+        "📋 Лиды из Google Sheets"
+        if sheets_stats["total"] > 0 else
+        "⚠️ Sheets не подключён — данные из памяти бота"
+    )
+
+    ga4_text = (
+        f"  👥 Пользователей: {ga4_stats['users']}\n"
+        f"  🔄 Сеансов: {ga4_stats['sessions']}\n"
+        f"  🆕 Новых: {ga4_stats['new_users']}\n"
+        f"  📄 Топ страница: {ga4_stats['top_page']}"
+    ) if ga4_stats["users"] > 0 else "  ⚠️ GA4 не настроен или нет данных ещё"
+
+    report = (
+        f"📊 <b>Еженедельный отчёт WeOneRent</b> <i>[ТЕСТ]</i>\n"
+        f"{'─' * 30}\n"
+        f"🔻 <b>Воронка бота за неделю:</b>\n{funnel_text}\n"
+        f"{'─' * 30}\n"
+        f"📍 <b>По городам:</b>\n{cities_text}\n"
+        f"{'─' * 30}\n"
+        f"🌐 <b>Сайт за 7 дней:</b>\n{ga4_text}\n"
+        f"{'─' * 30}\n"
+        f"{sheets_note}\n"
+        f"📈 <a href='https://datastudio.google.com/reporting/535b5921-7ac0-42c9-8804-9eb72d953f49'>Дашборд Looker Studio</a>"
+    )
+    await update.message.reply_text(report, parse_mode="HTML", disable_web_page_preview=True)
+
 async def privacy_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """GDPR — user rights and data processing information."""
     chat_id = update.effective_chat.id
@@ -1722,7 +1787,8 @@ def main():
     app.add_handler(CommandHandler("price",      price_cmd))
     app.add_handler(CommandHandler("faq",        faq_cmd))
     app.add_handler(CommandHandler("privacy",    privacy_cmd))
-    app.add_handler(CommandHandler("dashboard",  dashboard_cmd))
+    app.add_handler(CommandHandler("dashboard",   dashboard_cmd))
+    app.add_handler(CommandHandler("testreport", testreport_cmd))
     app.add_handler(CommandHandler("sheetstest", sheetstest_cmd))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_|^resume_"))
     app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
