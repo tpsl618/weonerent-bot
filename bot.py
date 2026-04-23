@@ -580,12 +580,12 @@ def schedule_all_posts(app):
             )
             count += 1
 
-    # Еженедельный отчёт — каждый понедельник в 08:00 по Мадриду
+    # Еженедельный отчёт — строго каждый понедельник в 09:00 по Мадриду
     if not app.job_queue.get_jobs_by_name("weekly_report"):
-        app.job_queue.run_repeating(
+        app.job_queue.run_daily(
             send_weekly_report,
-            interval=60 * 60 * 24 * 7,
-            first=dtime(8, 0, tzinfo=TZ),
+            time=dtime(hour=9, minute=0, tzinfo=TZ),
+            days=(0,),   # 0 = понедельник
             name="weekly_report",
         )
 
