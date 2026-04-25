@@ -2,6 +2,21 @@ import os
 import json
 import logging
 import asyncio
+import html as _html
+from pathlib import Path
+
+# Load .env from project root
+def _load_env():
+    for env_path in [Path(__file__).parent / ".env", Path(__file__).parent.parent / ".env"]:
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ.setdefault(k.strip(), v.strip())
+            break
+
+_load_env()
 import requests as _requests
 import pytz
 import tempfile
@@ -1126,7 +1141,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if step == STEP_CITY:
             # Нормализуем: кнопка «🏙 Барселона» → «Барселона»
             city_clean = CITY_BUTTON_MAP.get(text, text)
-            city_display = city_clean.capitalize()
+            city_display = _html.escape(city_clean.capitalize())
 
             # Проверяем — город из нашего списка?
             city_key = CITY_ALIASES.get(city_clean.lower(), city_clean.lower())
@@ -1235,7 +1250,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=REMOVE
             )
         elif step == STEP_NAME:
-            ud["name"] = text
+            ud["name"] = _html.escape(text.strip())
             ud["step"] = STEP_PHONE
             track_step("step_phone")
             name_first = text.strip().split()[0] if text.strip() else text
@@ -1276,7 +1291,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            ud["phone"] = phone_value if phone_value else text
+            ud["phone"] = _html.escape((phone_value if phone_value else text).strip())
             ud["step"]  = STEP_DONE
             ud["lead_sent"] = True
 
