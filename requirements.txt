@@ -3,3 +3,4 @@ requests==2.31.0
 pytz==2024.1
 google-analytics-data==0.18.13
 sentry-sdk==2.18.0
+stripe==11.4.1

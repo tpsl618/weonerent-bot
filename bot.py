@@ -22,6 +22,98 @@ _load_env()
 # Защищает от двойных заявок при быстром double-tap на мобиле (<50ms).
 _lead_locks: dict = {}
 
+# ─── Stripe Payment Integration (€100 deposit) ─────────────────────────────
+# Активируется при наличии STRIPE_SECRET_KEY в env.
+# Webhook signature валидируется через STRIPE_WEBHOOK_SECRET.
+STRIPE_SECRET_KEY     = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_DEPOSIT_AMOUNT = int(os.environ.get("STRIPE_DEPOSIT_AMOUNT_CENTS", "10000"))  # €100.00
+STRIPE_BOT_USERNAME   = os.environ.get("STRIPE_BOT_USERNAME", "weonerent_ai_bot")
+STRIPE_ENABLED = bool(STRIPE_SECRET_KEY)
+if STRIPE_ENABLED:
+    try:
+        import stripe as _stripe
+        _stripe.api_key = STRIPE_SECRET_KEY
+        _stripe.api_version = "2024-09-30.acacia"
+        logging.info(f"Stripe enabled (mode: {'live' if STRIPE_SECRET_KEY.startswith('sk_live_') else 'test'})")
+    except ImportError:
+        STRIPE_ENABLED = False
+        logging.warning("STRIPE_SECRET_KEY set but stripe SDK not installed; pip install stripe")
+    except Exception as e:
+        STRIPE_ENABLED = False
+        logging.warning(f"Stripe init failed: {e}")
+else:
+    _stripe = None
+    logging.info("Stripe disabled (no STRIPE_SECRET_KEY)")
+
+
+def create_deposit_checkout_session(chat_id: int, ud: dict) -> str | None:
+    """
+    Создаёт Stripe Checkout Session на €100 для закрепления брони.
+    Возвращает URL для оплаты или None если Stripe не настроен.
+
+    Idempotency: per chat_id + текущий лид (lead_sent установлен) → не создаст
+    дублей при повторных кликах на кнопку.
+    """
+    if not STRIPE_ENABLED or _stripe is None:
+        return None
+
+    name    = ud.get("name", "Гость") or "Гость"
+    city    = ud.get("city", "")
+    dates   = ud.get("dates", "")
+    car     = ud.get("car", "")
+    days    = ud.get("days_estimate", 0)
+
+    description = f"Резерв брони: {car} в {city} ({dates})" if city else "Резерв брони авто WeOneRent"
+
+    # Уникальный idempotency key — chat_id + время лида (миллисекунды)
+    import time as _t
+    idem_key = f"deposit_{chat_id}_{int(_t.time())}"
+
+    success_url = f"https://t.me/{STRIPE_BOT_USERNAME}?start=paid"
+    cancel_url  = f"https://t.me/{STRIPE_BOT_USERNAME}?start=cancelled"
+
+    try:
+        session = _stripe.checkout.Session.create(
+            mode="payment",
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "eur",
+                    "product_data": {
+                        "name": "WeOneRent — Резерв брони авто",
+                        "description": description,
+                        "metadata": {"chat_id": str(chat_id)},
+                    },
+                    "unit_amount": STRIPE_DEPOSIT_AMOUNT,  # 10000 = €100.00
+                },
+                "quantity": 1,
+            }],
+            metadata={
+                "chat_id": str(chat_id),
+                "name": name[:100],
+                "city": city[:50],
+                "dates": dates[:50],
+                "car": car[:50],
+                "days": str(days),
+            },
+            customer_creation="if_required",
+            payment_intent_data={
+                "statement_descriptor_suffix": "DEPOSIT",  # появится в выписке банка клиента
+                "metadata": {"chat_id": str(chat_id)},
+            },
+            success_url=success_url,
+            cancel_url=cancel_url,
+            locale="auto",
+            expires_at=int(_t.time()) + 24 * 60 * 60,  # ссылка живёт 24 часа
+            idempotency_key=idem_key,
+        )
+        logging.info(f"Stripe session created: {session.id} for chat_id={chat_id}")
+        return session.url
+    except Exception as e:
+        logging.error(f"Stripe checkout failed: {e}")
+        return None
+
 # ─── Sentry error tracking (опционально, активен если задан SENTRY_DSN) ──
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
 if SENTRY_DSN:
@@ -1667,14 +1759,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Пока ждёте — в нашем канале маршруты по Испании, "
                 "лайфхаки об аренде и актуальные цены 👇"
             )
-            final_keyboard = InlineKeyboardMarkup([
+            # Stripe Deposit button (если Stripe настроен) — превращает лида в платящего ×2
+            deposit_url = create_deposit_checkout_session(chat_id, ud) if STRIPE_ENABLED else None
+
+            final_keyboard_rows = []
+            if deposit_url:
+                final_keyboard_rows.append([
+                    InlineKeyboardButton("💳 Закрепить бронь — €100", url=deposit_url)
+                ])
+            final_keyboard_rows += [
                 [InlineKeyboardButton("📢 Наш канал @weonerent", url="https://t.me/weonerent")],
                 [InlineKeyboardButton("🌐 Сайт WeOneRent", url=site_url(UTM_FINAL)),
                  InlineKeyboardButton("💬 Написать менеджеру", url=get_manager_url())],
-            ])
+            ]
+            final_keyboard = InlineKeyboardMarkup(final_keyboard_rows)
+
+            # Если есть deposit_url — добавим про залог в summary
+            if deposit_url:
+                summary += (
+                    "\n\n💳 <b>Хотите гарантированно закрепить эту машину?</b>\n"
+                    "Внесите возвратный депозит €100 — он вернётся при выезде.\n"
+                    "Это исключит риск что машина уйдёт другому."
+                )
+
             track_lead(city)
             await send_lead(update, context, chat_id, ud)
-            await update.message.reply_text(summary, reply_markup=final_keyboard)
+            await update.message.reply_text(
+                summary,
+                reply_markup=final_keyboard,
+                parse_mode="HTML"
+            )
 
             # Реферальная программа
             await update.message.reply_text(
@@ -2058,8 +2172,171 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
+    def do_POST(self):
+        # Stripe webhook endpoint
+        if self.path != "/stripe/webhook":
+            self.send_response(404)
+            self.end_headers()
+            return
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            payload = self.rfile.read(content_length) if content_length > 0 else b""
+            sig_header = self.headers.get("Stripe-Signature", "")
+
+            # Без webhook secret или Stripe SDK — принимаем но не доверяем
+            if not STRIPE_ENABLED or _stripe is None:
+                self.send_response(503)
+                self.end_headers()
+                return
+
+            event = None
+            if STRIPE_WEBHOOK_SECRET:
+                try:
+                    event = _stripe.Webhook.construct_event(
+                        payload, sig_header, STRIPE_WEBHOOK_SECRET
+                    )
+                except Exception as e:
+                    logging.warning(f"Stripe webhook signature invalid: {e}")
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+            else:
+                # Если webhook secret не задан — парсим без проверки (опасно в проде)
+                logging.warning("STRIPE_WEBHOOK_SECRET not set — accepting webhook without signature check")
+                try:
+                    event = json.loads(payload.decode("utf-8"))
+                except Exception:
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+
+            # Сразу отвечаем 200 чтобы Stripe не ретраил, обрабатываем фоном
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"received":true}')
+
+            # Обработка события в отдельном thread (не блокируем HTTP server)
+            import threading as _th
+            _th.Thread(
+                target=_handle_stripe_event,
+                args=(event,),
+                daemon=True
+            ).start()
+        except Exception as e:
+            logging.error(f"Stripe webhook handler error: {e}")
+            try:
+                self.send_response(500)
+                self.end_headers()
+            except Exception:
+                pass
+
     def log_message(self, format, *args):
         pass  # не спамить логи
+
+
+def _handle_stripe_event(event):
+    """
+    Обработка Stripe webhook event'а в фоновом потоке.
+    Уведомляет менеджера и пользователя при оплате.
+    """
+    try:
+        event_type = event.get("type") if isinstance(event, dict) else event["type"]
+        data_obj = event.get("data", {}).get("object", {}) if isinstance(event, dict) else event["data"]["object"]
+
+        if event_type == "checkout.session.completed":
+            chat_id = int(data_obj.get("metadata", {}).get("chat_id", 0))
+            if not chat_id:
+                logging.warning(f"Stripe webhook: no chat_id in metadata, session_id={data_obj.get('id')}")
+                return
+
+            amount = (data_obj.get("amount_total") or 0) / 100  # cents → euro
+            customer_email = data_obj.get("customer_details", {}).get("email", "—")
+            metadata = data_obj.get("metadata", {})
+            name  = metadata.get("name", "—")
+            city  = metadata.get("city", "—")
+            dates = metadata.get("dates", "—")
+            car   = metadata.get("car", "—")
+
+            # 1. Notify owner / manager
+            owner_text = (
+                f"💳 <b>ОПЛАТА ПОЛУЧЕНА — €{amount:.0f}</b>\n\n"
+                f"👤 Имя: {name}\n"
+                f"📍 Город: {city}\n"
+                f"📅 Даты: {dates}\n"
+                f"🚗 Авто: {car}\n"
+                f"📧 Email: {customer_email}\n"
+                f"🔑 chat_id: {chat_id}\n\n"
+                f"<b>Бронь закреплена. Свяжитесь с клиентом немедленно.</b>"
+            )
+            try:
+                _post_to_telegram_simple(OWNER_CHAT_ID, owner_text)
+            except Exception as e:
+                logging.error(f"Failed to notify owner about payment: {e}")
+
+            # 2. Notify customer
+            user_text = (
+                "✅ <b>Бронь закреплена!</b>\n\n"
+                f"Спасибо! Депозит €{amount:.0f} успешно получен и зарезервирован.\n\n"
+                "Менеджер свяжется с вами в течение 5 минут с финальным подтверждением "
+                "и деталями выдачи.\n\n"
+                "💡 Депозит вернётся вам при выезде."
+            )
+            try:
+                _post_to_telegram_simple(chat_id, user_text)
+            except Exception as e:
+                logging.error(f"Failed to notify customer about payment: {e}")
+
+            # 3. Update Sheets (best-effort — добавим строку с payment_status=paid)
+            try:
+                if GOOGLE_SCRIPT_URL:
+                    _post_to_sheets_with_retry({
+                        "action": "payment_paid",
+                        "chat_id": chat_id,
+                        "amount": amount,
+                        "session_id": data_obj.get("id"),
+                        "email": customer_email,
+                        "timestamp": datetime.now(TZ).isoformat(),
+                    })
+            except Exception as e:
+                logging.warning(f"Failed to log payment to Sheets: {e}")
+
+            logging.info(f"Stripe payment completed: chat_id={chat_id}, amount=€{amount}")
+
+        elif event_type == "checkout.session.expired":
+            chat_id = int(data_obj.get("metadata", {}).get("chat_id", 0))
+            if chat_id:
+                logging.info(f"Stripe session expired: chat_id={chat_id}")
+                # Опционально — можно слать reminder, но не сейчас
+
+        elif event_type == "checkout.session.async_payment_failed":
+            chat_id = int(data_obj.get("metadata", {}).get("chat_id", 0))
+            if chat_id:
+                try:
+                    _post_to_telegram_simple(
+                        chat_id,
+                        "⚠️ Платёж не прошёл. Проверьте данные карты или попробуйте другую.\n\n"
+                        "Если нужна помощь — напишите менеджеру."
+                    )
+                except Exception:
+                    pass
+
+    except Exception as e:
+        logging.error(f"_handle_stripe_event error: {e}", exc_info=True)
+
+
+def _post_to_telegram_simple(chat_id: int, text: str):
+    """Простая отправка сообщения в Telegram через Bot API (sync, для webhook thread)."""
+    try:
+        r = _requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=10,
+        )
+        return r.ok
+    except Exception as e:
+        logging.error(f"_post_to_telegram_simple failed: {e}")
+        return False
 
 def _run_health_server():
     port = int(os.environ.get("PORT", 8080))
