@@ -68,10 +68,10 @@ AI_SYSTEM_PROMPT = """Ты — Алекс, виртуальный консуль
 ВАЖНО: если уверенности в ответе нет — пиши «Это уточню у менеджера, свяжитесь с ним 💬»."""
 
 
-def ai_faq_answer(question: str, user_first_name: str | None = None) -> str | None:
+def ai_faq_answer(question, user_first_name=None):
     """
     Запрос к Groq (OpenAI-compatible API) для ответа на FAQ.
-    Возвращает текст ответа или None при ошибке/отсутствии ключа.
+    Возвращает текст ответа (str) или None при ошибке/отсутствии ключа.
     Никогда не падает с exception (для production safety).
     """
     if not GROQ_ENABLED:
@@ -148,7 +148,7 @@ else:
     logging.info("Stripe disabled (no STRIPE_SECRET_KEY)")
 
 
-def create_deposit_checkout_session(chat_id: int, ud: dict) -> str | None:
+def create_deposit_checkout_session(chat_id, ud):
     """
     Создаёт Stripe Checkout Session на €100 для закрепления брони.
     Возвращает URL для оплаты или None если Stripe не настроен.
