@@ -1733,7 +1733,8 @@ _bot_started_at = datetime.now(pytz.timezone("Europe/Madrid")).strftime("%d.%m %
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/health":
+        # Принимаем как / так и /health (UptimeRobot часто пингует root)
+        if self.path in ("/", "/health", "/healthz", "/status"):
             body = json.dumps({
                 "status": "ok",
                 "bot": "WeOneRent",
@@ -1741,8 +1742,20 @@ class HealthHandler(BaseHTTPRequestHandler):
             }).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_HEAD(self):
+        # UptimeRobot и др. healthcheck-сервисы по умолчанию шлют HEAD
+        if self.path in ("/", "/health", "/healthz", "/status"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
         else:
             self.send_response(404)
             self.end_headers()
