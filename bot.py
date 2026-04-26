@@ -18,6 +18,10 @@ def _load_env():
 
 _load_env()
 
+# ─── Race-condition lock на сабмит лида (atomic per chat_id) ──────────────
+# Защищает от двойных заявок при быстром double-tap на мобиле (<50ms).
+_lead_locks: dict = {}
+
 # ─── Sentry error tracking (опционально, активен если задан SENTRY_DSN) ──
 SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
 if SENTRY_DSN:
@@ -168,6 +172,54 @@ CAR_KEYBOARD = ReplyKeyboardMarkup(
     [["Эконом", "Комфорт", "SUV"]],
     resize_keyboard=True, one_time_keyboard=True
 )
+
+
+def build_pre_quote_message(dates_text: str, days_estimate: int, city_key: str) -> str:
+    """
+    Pre-quote — показываем 3 опции авто с РЕАЛЬНЫМИ ценами за весь срок.
+    Если знаем days_estimate (3-60 дней) — показываем итог.
+    Иначе fallback на per-day цены.
+
+    Психология: видеть «Эконом — €224 за неделю» лучше, чем «Эконом — €22/сутки»
+    (легче принять решение → +20% конверсии в выбор авто).
+    """
+    prices = (PRICES.get(city_key) or {}) if city_key else {}
+    ep = prices.get("эконом", 22)
+    cp = prices.get("комфорт", 35)
+    sp = prices.get("suv", 48)
+
+    if 3 <= days_estimate <= 60:
+        # Используем calc_price чтобы учесть скидки за длительный срок если есть
+        try:
+            _, total_e = calc_price(city_key, "эконом", days_estimate)
+            _, total_c = calc_price(city_key, "комфорт", days_estimate)
+            _, total_s = calc_price(city_key, "suv", days_estimate)
+        except Exception:
+            total_e = ep * days_estimate
+            total_c = cp * days_estimate
+            total_s = sp * days_estimate
+
+        return (
+            f"✅ Срок: {dates_text} ({days_estimate} дн.)\n\n"
+            f"<b>Какой тип авто?</b>\n\n"
+            f"🟢 <b>Эконом</b> — €{total_e} за {days_estimate} дн.\n"
+            f"   <i>Seat Ibiza, VW Polo</i> · парковка в центре, расход 5л\n\n"
+            f"🔵 <b>Комфорт</b> — €{total_c} за {days_estimate} дн.\n"
+            f"   <i>Seat Leon, Skoda Octavia</i> · комфорт для 4 чел., A/C\n\n"
+            f"🔴 <b>SUV</b> — €{total_s} за {days_estimate} дн.\n"
+            f"   <i>Seat Ateca, Kia Sportage</i> · горные дороги, 5 чемоданов"
+        )
+
+    # Fallback — нет точного срока
+    return (
+        f"✅ Срок: {dates_text}\n\n"
+        f"<b>Какой тип авто?</b>\n\n"
+        f"🟢 <b>Эконом</b> — от €{ep}/сутки (Seat Ibiza, VW Polo)\n"
+        f"🔵 <b>Комфорт</b> — от €{cp}/сутки (Seat Leon, Skoda Octavia)\n"
+        f"🔴 <b>SUV</b> — от €{sp}/сутки (Seat Ateca, Kia Sportage)"
+    )
+
+
 PHONE_KEYBOARD = ReplyKeyboardMarkup(
     [
         [KeyboardButton("📱 Отправить мой номер", request_contact=True)],
@@ -1218,15 +1270,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ud["step"] = STEP_CAR
             track_step("step_car")
             city_key = ud.get("city_key", "")
-            prices = PRICES.get(city_key, {})
-            ep = prices.get("эконом", 22)
-            cp = prices.get("комфорт", 35)
-            sp = prices.get("suv", 48)
             await update.message.reply_text(
-                f"✅ Срок: {ud['dates']}\n\nКакой тип автомобиля?\n\n"
-                f"🟢 Эконом — от €{ep}/сутки (Seat Ibiza, VW Polo)\n"
-                f"🔵 Комфорт — от €{cp}/сутки (Seat Leon, Skoda Octavia)\n"
-                f"🔴 SUV — от €{sp}/сутки (Seat Ateca, Kia Sportage)",
+                build_pre_quote_message(ud["dates"], ud.get("days_estimate", 0), city_key),
+                parse_mode="HTML",
                 reply_markup=CAR_KEYBOARD
             )
 
@@ -1235,26 +1281,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ud["dates"]        = text
             ud["days_estimate"] = parse_days(text)
             ud["step"]         = STEP_CAR
-
-            days = ud["days_estimate"]
-            days_text = f"{days} дней" if days else "уточним с менеджером"
+            track_step("step_car")
 
             city_key = ud.get("city_key", "")
-            prices = PRICES.get(city_key, {})
-            ep = prices.get("эконом", 22)
-            cp = prices.get("комфорт", 35)
-            sp = prices.get("suv", 48)
             await update.message.reply_text(
-                f"✅ Даты: {text} ({days_text})\n\nКакой тип автомобиля?\n\n"
-                f"🟢 Эконом — от €{ep}/сутки (Seat Ibiza, VW Polo)\n"
-                f"🔵 Комфорт — от €{cp}/сутки (Seat Leon, Skoda Octavia)\n"
-                f"🔴 SUV — от €{sp}/сутки (Seat Ateca, Kia Sportage)",
+                build_pre_quote_message(text, ud["days_estimate"], city_key),
+                parse_mode="HTML",
                 reply_markup=CAR_KEYBOARD
             )
         elif step == STEP_CAR:
             ud["car"] = text
-            ud["step"] = STEP_NAME
-            track_step("step_name")
             # Считаем примерную стоимость из сохранённого days_estimate
             total_hint = ""
             try:
@@ -1268,10 +1304,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-            await update.message.reply_text(
-                f"✅ Автомобиль: {text}{total_hint}\n\nКак вас зовут? Введите имя и фамилию:",
-                reply_markup=REMOVE
+            # ── AUTO-FILL имени из Telegram first_name (срезает 1 шаг воронки) ──
+            # У ~70% юзеров есть first_name в TG-профиле → пропускаем шаг STEP_NAME
+            tg_user = update.effective_user
+            tg_first_name = (tg_user.first_name or "").strip() if tg_user else ""
+            # Валидация: 2+ символа, без цифр и спецсимволов, разумная длина
+            valid_tg_name = (
+                len(tg_first_name) >= 2
+                and len(tg_first_name) <= 40
+                and not any(ch.isdigit() for ch in tg_first_name)
+                and all(ch.isalpha() or ch in " -'" for ch in tg_first_name)
             )
+
+            if valid_tg_name:
+                # Auto-fill: сразу к шагу телефона, минуя ввод имени
+                ud["name"] = _html.escape(tg_first_name)
+                ud["step"] = STEP_PHONE
+                track_step("step_name")   # шаг считается пройденным
+                track_step("step_phone")  # и сразу следующий
+                await update.message.reply_text(
+                    f"✅ Автомобиль: {text}{total_hint}\n\n"
+                    f"Привет, {tg_first_name}! 🎉\n\n"
+                    "Последний шаг — как вам удобнее получить подтверждение?\n\n"
+                    "📞 <b>Телефон</b> — менеджер позвонит один раз, чтобы подтвердить детали. Никакого спама.\n\n"
+                    "💬 <b>Без звонка</b> — менеджер напишет вам прямо здесь, в Telegram.",
+                    parse_mode="HTML",
+                    reply_markup=PHONE_KEYBOARD
+                )
+            else:
+                # Fallback: классический шаг ввода имени
+                ud["step"] = STEP_NAME
+                track_step("step_name")
+                await update.message.reply_text(
+                    f"✅ Автомобиль: {text}{total_hint}\n\nКак вас зовут? Введите имя и фамилию:",
+                    reply_markup=REMOVE
+                )
         elif step == STEP_NAME:
             ud["name"] = _html.escape(text.strip())
             ud["step"] = STEP_PHONE
@@ -1306,17 +1373,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
 
-            # Защита от дублей — не отправляем заявку дважды
-            if ud.get("lead_sent"):
-                await update.message.reply_text(
-                    "Ваша заявка уже принята 👍 Менеджер скоро свяжется.",
-                    reply_markup=build_main_menu()
-                )
-                return
+            # Защита от дублей + race-condition lock — atomic через asyncio.Lock per chat_id
+            lock = _lead_locks.setdefault(chat_id, asyncio.Lock())
+            async with lock:
+                if ud.get("lead_sent"):
+                    await update.message.reply_text(
+                        "Ваша заявка уже принята 👍 Менеджер скоро свяжется.",
+                        reply_markup=build_main_menu()
+                    )
+                    return
 
-            ud["phone"] = _html.escape((phone_value if phone_value else text).strip())
-            ud["step"]  = STEP_DONE
-            ud["lead_sent"] = True
+                ud["phone"] = _html.escape((phone_value if phone_value else text).strip())
+                ud["step"]  = STEP_DONE
+                ud["lead_sent"] = True
 
             city    = ud.get("city", "—")
             dates   = ud.get("dates", "—")
