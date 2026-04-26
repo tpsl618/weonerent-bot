@@ -2,3 +2,4 @@ python-telegram-bot[job-queue]==21.6
 requests==2.31.0
 pytz==2024.1
 google-analytics-data==0.18.13
+sentry-sdk==2.18.0

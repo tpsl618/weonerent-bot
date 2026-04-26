@@ -17,6 +17,29 @@ def _load_env():
             break
 
 _load_env()
+
+# ─── Sentry error tracking (опционально, активен если задан SENTRY_DSN) ──
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+if SENTRY_DSN:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.logging import LoggingIntegration
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            traces_sample_rate=0.1,
+            profiles_sample_rate=0.1,
+            environment=os.environ.get("ENV", "production"),
+            release=os.environ.get("RELEASE", "weonerent-bot@1.0"),
+            integrations=[LoggingIntegration(level=logging.INFO, event_level=logging.ERROR)],
+            send_default_pii=False,  # GDPR — не шлём PII по умолчанию
+            attach_stacktrace=True,
+        )
+        sentry_sdk.set_tag("service", "telegram-bot")
+        logging.info("Sentry initialized")
+    except ImportError:
+        logging.warning("SENTRY_DSN set but sentry-sdk not installed; pip install sentry-sdk")
+    except Exception as e:
+        logging.warning(f"Sentry init failed: {e}")
 import requests as _requests
 import pytz
 import tempfile
