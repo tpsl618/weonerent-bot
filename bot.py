@@ -130,7 +130,7 @@ DATES_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["📅 3–4 дня",    "📅 5–7 дней"],
         ["📅 1–2 недели", "📅 Больше 2 недель"],
-        ["✏️ Указать точные даты"],
+        ["🗓 Открыть календарь"],
     ],
     resize_keyboard=True, one_time_keyboard=True
 )
@@ -142,6 +142,105 @@ DATES_BUTTON_MAP = {
     "📅 1–2 недели":     10,
     "📅 Больше 2 недель": 16,
 }
+
+CALENDAR_TRIGGER = "🗓 Открыть календарь"
+CALENDAR_TRIGGER_OLD = "✏️ Указать точные даты"  # обратная совместимость
+
+# ─── INLINE CALENDAR (самописный, без сторонних зависимостей) ──────────────
+# Решает главную проблему воронки: ~50% юзеров не могут ввести даты текстом.
+# UX: 2 шага — выбор start date, потом end date. Auto-calc days_estimate.
+# CallbackData формат:
+#   cal:nav:<role>:YYYY-MM     — навигация (role = start | end)
+#   cal:pick:<role>:YYYY-MM-DD — выбор даты
+#   cal:noop                   — пустые кнопки (заголовки, дни недели)
+
+_RU_MONTHS = ["Январь","Февраль","Март","Апрель","Май","Июнь",
+              "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"]
+_RU_WEEKDAYS = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"]
+
+
+def build_calendar_keyboard(year: int, month: int, role: str,
+                            min_date=None, picked_start=None) -> InlineKeyboardMarkup:
+    """
+    role = 'start' | 'end'
+    min_date — дата ниже которой нельзя выбрать (для end это picked_start, для start — сегодня)
+    picked_start — выбранный start (для подсветки в end-режиме)
+    """
+    import calendar as _cal
+    from datetime import date as _date
+
+    today = _date.today()
+    if min_date is None:
+        min_date = today
+
+    # Заголовок: «Май 2026» + role hint
+    role_hint = "📍 Дата начала" if role == "start" else "🏁 Дата конца"
+    header = f"{role_hint} · {_RU_MONTHS[month-1]} {year}"
+
+    rows = []
+    # Строка 1: заголовок
+    rows.append([InlineKeyboardButton(header, callback_data="cal:noop")])
+
+    # Строка 2: навигация ‹ Месяц ›
+    prev_year, prev_month = (year, month - 1) if month > 1 else (year - 1, 12)
+    next_year, next_month = (year, month + 1) if month < 12 else (year + 1, 1)
+    # Ограничение: не даём листать в прошлое
+    prev_btn_text = "‹"
+    prev_cb = f"cal:nav:{role}:{prev_year:04d}-{prev_month:02d}"
+    if (prev_year, prev_month) < (today.year, today.month):
+        prev_btn_text = "·"
+        prev_cb = "cal:noop"
+    # Ограничение: вперёд не дальше +18 месяцев
+    max_year, max_month = today.year, today.month + 18
+    while max_month > 12:
+        max_year += 1
+        max_month -= 12
+    next_btn_text = "›"
+    next_cb = f"cal:nav:{role}:{next_year:04d}-{next_month:02d}"
+    if (next_year, next_month) > (max_year, max_month):
+        next_btn_text = "·"
+        next_cb = "cal:noop"
+
+    rows.append([
+        InlineKeyboardButton(prev_btn_text, callback_data=prev_cb),
+        InlineKeyboardButton(f"{_RU_MONTHS[month-1]} {year}", callback_data="cal:noop"),
+        InlineKeyboardButton(next_btn_text, callback_data=next_cb),
+    ])
+
+    # Строка 3: дни недели
+    rows.append([InlineKeyboardButton(d, callback_data="cal:noop") for d in _RU_WEEKDAYS])
+
+    # Сетка дат
+    cal = _cal.Calendar(firstweekday=0)  # понедельник = 0
+    for week in cal.monthdatescalendar(year, month):
+        row = []
+        for d in week:
+            if d.month != month:
+                row.append(InlineKeyboardButton(" ", callback_data="cal:noop"))
+                continue
+            if d < min_date:
+                row.append(InlineKeyboardButton(f"·{d.day}·", callback_data="cal:noop"))
+                continue
+            label = str(d.day)
+            # Подсветка today
+            if d == today:
+                label = f"[{d.day}]"
+            # Подсветка picked_start в end-режиме
+            if role == "end" and picked_start and d == picked_start:
+                label = f"✓{d.day}"
+            row.append(InlineKeyboardButton(
+                label,
+                callback_data=f"cal:pick:{role}:{d.isoformat()}"
+            ))
+        rows.append(row)
+
+    # Подсказка снизу
+    if role == "start":
+        rows.append([InlineKeyboardButton("← Назад к опциям", callback_data="cal:cancel")])
+    else:
+        rows.append([InlineKeyboardButton("← Изменить дату начала", callback_data="cal:back_to_start")])
+
+    return InlineKeyboardMarkup(rows)
 
 CITY_KEYBOARD = ReplyKeyboardMarkup(
     [
@@ -849,6 +948,119 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
 
+# ─── Inline-calendar callback handler (cal:*) ──────────────────────────────
+async def calendar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    from datetime import date as _date
+    query = update.callback_query
+    await query.answer()
+    data = query.data or ""
+    chat_id = query.message.chat_id
+    ud = user_data.setdefault(chat_id, {})
+
+    if data == "cal:noop":
+        return
+
+    parts = data.split(":")
+    # cal:cancel  — вернуться к выбору срока кнопками
+    if len(parts) == 2 and parts[1] == "cancel":
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id,
+            "Хорошо, выберите срок кнопкой:",
+            reply_markup=DATES_KEYBOARD
+        )
+        return
+
+    # cal:back_to_start — переход обратно к выбору start даты
+    if len(parts) == 2 and parts[1] == "back_to_start":
+        ud.pop("cal_start", None)
+        today = _date.today()
+        await query.edit_message_reply_markup(
+            reply_markup=build_calendar_keyboard(today.year, today.month, "start")
+        )
+        return
+
+    # cal:nav:<role>:YYYY-MM
+    if len(parts) >= 4 and parts[1] == "nav":
+        role = parts[2]
+        try:
+            y, m = parts[3].split("-")
+            year, month = int(y), int(m)
+        except Exception:
+            return
+        picked_start = ud.get("cal_start")
+        await query.edit_message_reply_markup(
+            reply_markup=build_calendar_keyboard(
+                year, month, role,
+                min_date=picked_start if role == "end" else None,
+                picked_start=picked_start
+            )
+        )
+        return
+
+    # cal:pick:<role>:YYYY-MM-DD
+    if len(parts) >= 4 and parts[1] == "pick":
+        role = parts[2]
+        try:
+            picked = _date.fromisoformat(parts[3])
+        except Exception:
+            return
+
+        if role == "start":
+            ud["cal_start"] = picked
+            # Показать calendar для end даты — стартуем с того же месяца
+            await query.edit_message_text(
+                f"📍 Дата начала: <b>{picked.strftime('%d %b %Y')}</b>\n\n"
+                f"Теперь выберите дату возврата:",
+                parse_mode="HTML",
+                reply_markup=build_calendar_keyboard(
+                    picked.year, picked.month, "end",
+                    min_date=picked, picked_start=picked
+                )
+            )
+            return
+
+        # role == "end"
+        cal_start = ud.get("cal_start")
+        if not cal_start:
+            # На всякий — возврат к старту
+            today = _date.today()
+            await query.edit_message_reply_markup(
+                reply_markup=build_calendar_keyboard(today.year, today.month, "start")
+            )
+            return
+        if picked < cal_start:
+            # Защита — не позволяем выбрать end раньше start
+            await query.answer("Дата возврата должна быть позже даты начала", show_alert=True)
+            return
+
+        # ✅ Обе даты выбраны — сохраняем в ud, переходим к STEP_CAR с pre-quote
+        days = (picked - cal_start).days + 1  # включая обе даты
+        date_fmt = f"{cal_start.strftime('%d.%m')}–{picked.strftime('%d.%m.%Y')}"
+        ud["dates"]         = date_fmt
+        ud["days_estimate"] = days
+        ud["step"]          = STEP_CAR
+        ud.pop("cal_start", None)
+        track_step("step_car")
+
+        # Удаляем сообщение с календарём
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+        city_key = ud.get("city_key", "")
+        await context.bot.send_message(
+            chat_id,
+            build_pre_quote_message(date_fmt, days, city_key),
+            parse_mode="HTML",
+            reply_markup=CAR_KEYBOARD
+        )
+
+
 async def reset(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_data[chat_id] = {"step": None}
@@ -1247,12 +1459,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=DATES_KEYBOARD
             )
         elif step == STEP_DATES:
-            if text == "✏️ Указать точные даты":
-                # Пользователь хочет ввести даты вручную
+            # Новая кнопка — открыть inline-календарь
+            if text == CALENDAR_TRIGGER:
+                from datetime import date as _date
+                today = _date.today()
+                # Убираем reply-keyboard
+                await update.message.reply_text(
+                    "📅 Выберите даты на календаре ниже:",
+                    reply_markup=REMOVE
+                )
+                await update.message.reply_text(
+                    "Кликните на дату начала аренды:",
+                    reply_markup=build_calendar_keyboard(today.year, today.month, "start")
+                )
+                # Шаг остаётся STEP_DATES — переход выполнит calendar_callback после выбора end даты
+                return
+
+            # Старая кнопка (обратная совместимость) — текстовый ввод
+            if text in (CALENDAR_TRIGGER_OLD, "✏️ Указать точные даты"):
                 ud["step"] = STEP_DATES_DETAIL
                 await update.message.reply_text(
                     "Введите даты или срок аренды.\n\n"
-                    "Например: с 10 по 17 июля  или  7 дней",
+                    "Например: с 10 по 17 июля  или  7 дней\n"
+                    "Или нажмите 🗓 на клавиатуре для календаря.",
                     reply_markup=REMOVE
                 )
                 return
@@ -1926,6 +2155,7 @@ def main():
     app.add_handler(CommandHandler("testreport", testreport_cmd))
     app.add_handler(CommandHandler("sheetstest", sheetstest_cmd))
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_|^resume_"))
+    app.add_handler(CallbackQueryHandler(calendar_callback, pattern="^cal:"))
     app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.CONTACT, handle_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
