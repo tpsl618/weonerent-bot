@@ -120,6 +120,19 @@ if SENTRY_DSN:
     try:
         import sentry_sdk
         from sentry_sdk.integrations.logging import LoggingIntegration
+
+        # Фильтр транзиентных сетевых ошибок — не засоряют квоту Sentry
+        _SENTRY_TRANSIENT_NAMES = {
+            "RemoteProtocolError", "ConnectError", "ReadError", "ReadTimeout",
+            "WriteError", "PoolTimeout", "NetworkError", "TimedOut", "RetryAfter",
+        }
+        def _sentry_before_send(event, hint):
+            exc_info = hint.get("exc_info") if hint else None
+            if exc_info and exc_info[0] is not None:
+                if exc_info[0].__name__ in _SENTRY_TRANSIENT_NAMES:
+                    return None
+            return event
+
         sentry_sdk.init(
             dsn=SENTRY_DSN,
             traces_sample_rate=0.1,
@@ -129,6 +142,7 @@ if SENTRY_DSN:
             integrations=[LoggingIntegration(level=logging.INFO, event_level=logging.ERROR)],
             send_default_pii=False,  # GDPR — не шлём PII по умолчанию
             attach_stacktrace=True,
+            before_send=_sentry_before_send,
         )
         sentry_sdk.set_tag("service", "telegram-bot")
         logging.info("Sentry initialized")
@@ -153,6 +167,7 @@ from telegram.ext import (
     PicklePersistence
 )
 from telegram.constants import ChatMemberStatus
+from telegram.error import NetworkError, TimedOut, RetryAfter
 from datetime import time as dtime
 from itertools import cycle
 from content import SCHEDULED_POSTS, LIFEHACKS
@@ -2595,14 +2610,40 @@ def main():
     app.add_handler(MessageHandler(filters.CONTACT, handle_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # ─── Error handler — логирует ВСЕ ошибки хендлеров ───────────
+    # ─── Error handler — логирует ВСЕ ошибки, в чат шлёт только реальные баги ──
+    # Транзиентные сетевые ошибки (RemoteProtocolError, NetworkError, TimedOut)
+    # ловятся Sentry + Railway logs, но в чат не идут — иначе спам.
+    # Дедуп: одинаковые ошибки не чаще раза в 5 мин.
+    import httpx as _httpx
+    TRANSIENT_ERRORS = (
+        NetworkError, TimedOut, RetryAfter,
+        _httpx.RemoteProtocolError, _httpx.ConnectError, _httpx.ReadError,
+        _httpx.ReadTimeout, _httpx.WriteError, _httpx.PoolTimeout,
+    )
+    import time as _time_mod
+    _alert_dedup: dict[str, float] = {}
+    ALERT_COOLDOWN_SEC = 300
+
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-        logger.error(f"PTB error: {context.error}", exc_info=context.error)
+        err = context.error
+        logger.error(f"PTB error: {err}", exc_info=err)
+
+        # Транзиентные сетевые ошибки — только в логи/Sentry, не в чат
+        if isinstance(err, TRANSIENT_ERRORS):
+            return
+
+        # Дедуп по типу ошибки
+        sig = f"{type(err).__name__}:{str(err)[:80]}"
+        now = _time_mod.time()
+        last = _alert_dedup.get(sig, 0)
+        if now - last < ALERT_COOLDOWN_SEC:
+            return
+        _alert_dedup[sig] = now
+
         try:
-            # Уведомляем владельца об ошибке
             await context.bot.send_message(
                 chat_id=OWNER_CHAT_ID,
-                text=f"⚠️ Ошибка бота:\n<code>{context.error}</code>",
+                text=f"⚠️ Ошибка бота:\n<code>{type(err).__name__}: {str(err)[:200]}</code>",
                 parse_mode="HTML"
             )
         except Exception:
