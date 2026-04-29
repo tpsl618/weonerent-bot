@@ -13,7 +13,11 @@ def _load_env():
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
-                    os.environ.setdefault(k.strip(), v.strip())
+                    # Strip surrounding quotes (single, double) so BOT_TOKEN="abc" -> abc
+                    v = v.strip()
+                    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+                        v = v[1:-1]
+                    os.environ.setdefault(k.strip(), v)
             break
 
 _load_env()
@@ -661,7 +665,9 @@ def append_lead_to_sheets(ud: dict, user, chat_id: int, price_est: str = ""):
     """Отправляет лид в Google Sheets. При неудаче — кладёт в очередь retry."""
     if not GOOGLE_SCRIPT_URL:
         return
-    username = f"@{user.username}" if user.username else f"tg://user?id={chat_id}"
+    # FIX: tg:// не работает в Sheets/браузере — лучше chat_id который менеджер
+    # может открыть через бот /chat <id> или Telegram Saved Messages.
+    username = f"@{user.username}" if user.username else f"id:{chat_id}"
     payload = {
         "date":     datetime.now(TZ).strftime("%d.%m.%Y %H:%M"),
         "name":     ud.get("name", "—"),
@@ -1544,7 +1550,8 @@ async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Формат: /price Город Класс Дней\n\n"
             "Пример: /price Барселона SUV 7\n\n"
             "Города: Барселона, Мадрид, Малага, Аликанте, Валенсия, Севилья, Торревьеха, Гандия, Дения, Марбелья\n"
-            "Классы: Эконом, Комфорт, SUV, Минивэн"
+            # FIX: убрал "Минивэн" — его нет в PRICES, юзер получал fallback на эконом
+            "Классы: Эконом, Комфорт, SUV"
         )
         return
     city_raw, car_raw = args[0], args[1]
@@ -1684,7 +1691,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ Ошибка: {e}\n\nУбедись что бот — администратор {CHANNEL_ID}",
                 reply_markup=REMOVE
             )
-        user_data[chat_id] = {"step": STEP_CITY}
+        # FIX: было STEP_CITY — после публикации админа следующее сообщение
+        # попадало в воронку "выбор города". Сбрасываем шаг полностью.
+        user_data[chat_id] = {"step": None}
         return
 
     # ── Обычная заявка ──
@@ -1712,6 +1721,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             track_step("step_dates")
 
             # Напоминание через 2 часа если не завершит
+            # FIX: дедуп — отменяем предыдущий job если юзер заново вошёл в воронку.
+            # Иначе при повторных входах копились 2-3 параллельных reminder.
+            try:
+                for old_job in context.job_queue.get_jobs_by_name(f"remind_{chat_id}"):
+                    old_job.schedule_removal()
+            except Exception:
+                pass
             context.job_queue.run_once(
                 remind_abandoned,
                 when=60 * 60 * 2,
@@ -1837,7 +1853,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ud["name"] = _html.escape(text.strip())
             ud["step"] = STEP_PHONE
             track_step("step_phone")
-            name_first = text.strip().split()[0] if text.strip() else text
+            # FIX: name_first используется в HTML parse_mode сообщении — нужен escape
+            # против XSS (имена с & < > ломали parse_mode и юзер видел "Технический сбой")
+            name_first_raw = text.strip().split()[0] if text.strip() else text
+            name_first = _html.escape(name_first_raw)
             await update.message.reply_text(
                 f"Почти готово, {name_first}! 🎉\n\n"
                 "Последний шаг — как вам удобнее получить подтверждение?\n\n"
@@ -1851,7 +1870,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             telegram_no_call = (text == TELEGRAM_CONTACT_MARKER)
             if telegram_no_call:
                 user = update.effective_user
-                tg_handle = f"@{user.username}" if user.username else f"tg://user?id={chat_id}"
+                # FIX: tg://user?id= не открывается из браузера/Sheets — менеджер
+                # не мог связаться. Используем @username если есть, иначе chat_id
+                # (менеджер открывает чат через Telegram bot search by ID).
+                if user.username:
+                    tg_handle = f"@{user.username}"
+                else:
+                    tg_handle = f"id:{chat_id} (нажми на сообщение в боте → профиль)"
                 phone_value = f"Telegram: {tg_handle}"
             else:
                 phone_value = None
@@ -2275,22 +2300,33 @@ async def send_lead(update, context, client_chat_id, ud):
         except Exception:
             pass
 
+    # FIX: HTML escape всех user-provided полей — иначе & < > ломают parse_mode.
+    full_name_e = _html.escape(str(user.full_name or "—"))
+    username_e  = _html.escape(str(username))
+    city_e      = _html.escape(str(ud.get("city", "—")))
+    dates_e     = _html.escape(str(ud.get("dates", "—")))
+    car_e       = _html.escape(str(ud.get("car", "—")))
+    name_e      = _html.escape(str(ud.get("name", "—")))
+    phone_e     = _html.escape(str(ud.get("phone", "—")))
+    price_e     = _html.escape(str(price_est)) if price_est else ""
     lead = (
         f"🆕 НОВАЯ ЗАЯВКА — WeOneRent\n"
         f"{'─' * 25}\n"
-        f"Клиент: {user.full_name or '—'} ({username})\n"
+        f"Клиент: {full_name_e} ({username_e})\n"
         f"{'─' * 25}\n"
-        f"Город: {ud.get('city', '—')}\n"
-        f"Даты: {ud.get('dates', '—')}\n"
-        f"Авто: {ud.get('car', '—')}\n"
-        f"Имя: {ud.get('name', '—')}\n"
-        f"Телефон: {ud.get('phone', '—')}\n"
-        + (f"Стоимость: {price_est}\n" if price_est else "") +
+        f"Город: {city_e}\n"
+        f"Даты: {dates_e}\n"
+        f"Авто: {car_e}\n"
+        f"Имя: {name_e}\n"
+        f"Телефон: {phone_e}\n"
+        + (f"Стоимость: {price_e}\n" if price_est else "") +
         f"{'─' * 25}\n"
-        f"Написать: tg://user?id={client_chat_id}"
+        # FIX: дублируем chat_id текстом для копирования + tg:// link для клика в Telegram.
+        f"Chat ID: <code>{client_chat_id}</code>\n"
+        f"Написать: <a href=\"tg://user?id={client_chat_id}\">открыть чат</a>"
     )
     try:
-        await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=lead)
+        await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=lead, parse_mode="HTML")
         logger.info(f"Заявка отправлена от {username}")
     except Exception as e:
         logger.error(f"Ошибка отправки: {e}")
@@ -2431,14 +2467,23 @@ def _handle_stripe_event(event):
             dates = metadata.get("dates", "—")
             car   = metadata.get("car", "—")
 
+            # FIX: Stripe webhook metadata — это user input в HTML parse_mode
+            # Без escape имена/email с & < > ломают parse_mode → менеджер
+            # не получает уведомление об оплате (молча падает в Telegram 400)
+            name_e          = _html.escape(str(name or ""))
+            city_e          = _html.escape(str(city or ""))
+            dates_e         = _html.escape(str(dates or ""))
+            car_e           = _html.escape(str(car or ""))
+            customer_email_e = _html.escape(str(customer_email or ""))
+
             # 1. Notify owner / manager
             owner_text = (
                 f"💳 <b>ОПЛАТА ПОЛУЧЕНА — €{amount:.0f}</b>\n\n"
-                f"👤 Имя: {name}\n"
-                f"📍 Город: {city}\n"
-                f"📅 Даты: {dates}\n"
-                f"🚗 Авто: {car}\n"
-                f"📧 Email: {customer_email}\n"
+                f"👤 Имя: {name_e}\n"
+                f"📍 Город: {city_e}\n"
+                f"📅 Даты: {dates_e}\n"
+                f"🚗 Авто: {car_e}\n"
+                f"📧 Email: {customer_email_e}\n"
                 f"🔑 chat_id: {chat_id}\n\n"
                 f"<b>Бронь закреплена. Свяжитесь с клиентом немедленно.</b>"
             )
