@@ -2389,8 +2389,13 @@ class HealthHandler(BaseHTTPRequestHandler):
                 from urllib.parse import urlparse, parse_qs
                 qs = parse_qs(urlparse(self.path).query)
                 provided_key = qs.get("key", [""])[0]
-                expected_key = os.environ.get("ADMIN_USERNAME", "wor-admin-2026")
-                if provided_key != expected_key:
+                # Accept ADMIN_USERNAME, OWNER_CHAT_ID, or BOT_TOKEN suffix
+                valid_keys = [
+                    os.environ.get("ADMIN_USERNAME", ""),
+                    str(OWNER_CHAT_ID),
+                    (BOT_TOKEN or "")[-10:],  # last 10 chars of bot token
+                ]
+                if provided_key not in valid_keys or not provided_key:
                     self.send_response(403)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
