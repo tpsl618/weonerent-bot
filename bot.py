@@ -2381,6 +2381,61 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/test_telegram"):
+            # 2026-05-12: Diagnostic endpoint to test Telegram OWNER_CHAT_ID delivery.
+            # Usage: curl https://worker-production-56a4.up.railway.app/test_telegram?key=ADMIN
+            # Returns: JSON with success/error + sends test message to OWNER_CHAT_ID.
+            try:
+                from urllib.parse import urlparse, parse_qs
+                qs = parse_qs(urlparse(self.path).query)
+                provided_key = qs.get("key", [""])[0]
+                expected_key = os.environ.get("ADMIN_USERNAME", "wor-admin-2026")
+                if provided_key != expected_key:
+                    self.send_response(403)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"error": "Forbidden — provide ?key=ADMIN_USERNAME"}).encode())
+                    return
+
+                # Direct Telegram API call (bypasses python-telegram-bot to test plain connectivity)
+                import urllib.request as _urlreq
+                import urllib.parse as _urlparse
+                now = datetime.now(TZ).strftime("%d.%m %H:%M:%S")
+                test_msg = (
+                    f"🔬 DIAGNOSTIC PING — {now}\n"
+                    f"{'─' * 25}\n"
+                    f"Bot: WeOneRent (Railway)\n"
+                    f"Owner ID: {OWNER_CHAT_ID}\n"
+                    f"Bot started: {_bot_started_at}\n"
+                    f"{'─' * 25}\n"
+                    f"Если это видишь — Telegram delivery работает.\n"
+                    f"Если НЕ видишь — bot blocked / token revoked / chat_id wrong."
+                )
+                api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+                body = _urlparse.urlencode({"chat_id": OWNER_CHAT_ID, "text": test_msg}).encode()
+                req = _urlreq.Request(api_url, data=body, method="POST")
+                with _urlreq.urlopen(req, timeout=10) as resp:
+                    tg_status = resp.status
+                    tg_body = resp.read().decode("utf-8", errors="ignore")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "telegram_api_status": tg_status,
+                    "owner_chat_id": OWNER_CHAT_ID,
+                    "bot_token_set": bool(BOT_TOKEN),
+                    "bot_token_prefix": (BOT_TOKEN or "")[:10] + "…" if BOT_TOKEN else None,
+                    "telegram_response": tg_body[:500]
+                }).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "error": str(e),
+                    "owner_chat_id": OWNER_CHAT_ID,
+                    "bot_token_set": bool(BOT_TOKEN)
+                }).encode())
         else:
             self.send_response(404)
             self.end_headers()
