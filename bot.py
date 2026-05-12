@@ -183,6 +183,12 @@ CHANNEL_ID        = os.environ.get("CHANNEL_ID", "@weonerent")
 DISCUSSION_GROUP  = os.environ.get("DISCUSSION_GROUP", "")   # ID группы обсуждения
 ADMIN_USERNAME    = os.environ.get("ADMIN_USERNAME", "")   # Telegram username без @
 
+# 2026-05-12: AUTOPOST kill-switch. Default DISABLED — реструктуризация контента.
+# Когда вернёмся с новой структурой постов: установить AUTOPOST_ENABLED=true в Railway.
+# Отключает только auto_publish (SCHEDULED_POSTS) + publish_lifehack.
+# Chat-бот воронки, weekly_report, flush_leads — продолжают работать.
+AUTOPOST_ENABLED  = os.environ.get("AUTOPOST_ENABLED", "false").lower() in ("true", "1", "yes", "on")
+
 # ─── Facebook Conversions API ────────────────────────────────────
 FB_PIXEL_ID      = os.environ.get("FB_PIXEL_ID", "787631537198771")
 FB_ACCESS_TOKEN  = os.environ.get("FB_ACCESS_TOKEN", "")   # из Events Manager → Настройки
@@ -967,20 +973,39 @@ async def publish_lifehack(context: ContextTypes.DEFAULT_TYPE):
 def schedule_all_posts(app):
     now = datetime.now(TZ)
 
-    # Разовые посты (Недели 1–8)
     count = 0
-    for post in SCHEDULED_POSTS:
-        when = post["when"]
-        if when > now:
-            app.job_queue.run_once(
-                auto_publish,
-                when=when,
-                data=post,
-                name=f"post_{when.strftime('%d%m_%H%M')}",
+
+    # 2026-05-12: kill-switch для автопостинга в канал.
+    # AUTOPOST_ENABLED=false → НЕ планируем SCHEDULED_POSTS и НЕ запускаем lifehack rotation.
+    # Это останавливает посты "про парковки/фишки", не ломая бота воронки.
+    if AUTOPOST_ENABLED:
+        # Разовые посты (Недели 1–8)
+        for post in SCHEDULED_POSTS:
+            when = post["when"]
+            if when > now:
+                app.job_queue.run_once(
+                    auto_publish,
+                    when=when,
+                    data=post,
+                    name=f"post_{when.strftime('%d%m_%H%M')}",
+                )
+                count += 1
+
+        # Вечная ротация лайфхаков — каждый пн 09:30 и чт 19:30 по Мадриду
+        # Запускается начиная с 23 июня (после окончания основного расписания)
+        rotation_start = TZ.localize(datetime(2026, 6, 23, 0, 0))
+        if not app.job_queue.get_jobs_by_name("lifehack_rotation"):
+            app.job_queue.run_repeating(
+                publish_lifehack,
+                interval=60 * 60 * 24 * 7 / 2,   # дважды в неделю (каждые 3.5 дня)
+                first=rotation_start if now < rotation_start else now,
+                name="lifehack_rotation",
             )
-            count += 1
+    else:
+        logger.warning("AUTOPOST_ENABLED=false — автопостинг в канал ОТКЛЮЧЕН. Чтобы включить, установи AUTOPOST_ENABLED=true в Railway.")
 
     # Еженедельный отчёт — строго каждый понедельник в 09:00 по Мадриду
+    # (адресован owner'у, не в канал — НЕ зависит от AUTOPOST_ENABLED)
     if not app.job_queue.get_jobs_by_name("weekly_report"):
         app.job_queue.run_daily(
             send_weekly_report,
@@ -989,19 +1014,8 @@ def schedule_all_posts(app):
             name="weekly_report",
         )
 
-    # Вечная ротация лайфхаков — каждый пн 09:30 и чт 19:30 по Мадриду
-    # Запускается начиная с 23 июня (после окончания основного расписания)
-    rotation_start = TZ.localize(datetime(2026, 6, 23, 0, 0))
-
-    if not app.job_queue.get_jobs_by_name("lifehack_rotation"):
-        app.job_queue.run_repeating(
-            publish_lifehack,
-            interval=60 * 60 * 24 * 7 / 2,   # дважды в неделю (каждые 3.5 дня)
-            first=rotation_start if now < rotation_start else now,
-            name="lifehack_rotation",
-        )
-
     # Retry неотправленных лидов — каждые 10 минут
+    # (системная задача — НЕ зависит от AUTOPOST_ENABLED)
     if not app.job_queue.get_jobs_by_name("flush_leads"):
         app.job_queue.run_repeating(
             flush_failed_leads,
@@ -1010,7 +1024,8 @@ def schedule_all_posts(app):
             name="flush_leads",
         )
 
-    logger.info(f"Запланировано {count} постов + вечная ротация лайфхаков")
+    if AUTOPOST_ENABLED:
+        logger.info(f"Запланировано {count} постов + вечная ротация лайфхаков")
     return count
 
 # ─── Команды ────────────────────────────────────────────────────
@@ -2399,25 +2414,23 @@ class HealthHandler(BaseHTTPRequestHandler):
                 return
 
             event = None
-            if STRIPE_WEBHOOK_SECRET:
-                try:
-                    event = _stripe.Webhook.construct_event(
-                        payload, sig_header, STRIPE_WEBHOOK_SECRET
-                    )
-                except Exception as e:
-                    logging.warning(f"Stripe webhook signature invalid: {e}")
-                    self.send_response(400)
-                    self.end_headers()
-                    return
-            else:
-                # Если webhook secret не задан — парсим без проверки (опасно в проде)
-                logging.warning("STRIPE_WEBHOOK_SECRET not set — accepting webhook without signature check")
-                try:
-                    event = json.loads(payload.decode("utf-8"))
-                except Exception:
-                    self.send_response(400)
-                    self.end_headers()
-                    return
+            if not STRIPE_WEBHOOK_SECRET:
+                # Sprint 8 security audit fix CRIT-2: fail-closed when secret missing.
+                # Previous code accepted unsigned webhooks → anyone could forge "payment received"
+                # events and flood manager Telegram. Now we 503 until secret is configured.
+                logging.error("STRIPE_WEBHOOK_SECRET not set — refusing webhook (set the secret in env to enable)")
+                self.send_response(503)
+                self.end_headers()
+                return
+            try:
+                event = _stripe.Webhook.construct_event(
+                    payload, sig_header, STRIPE_WEBHOOK_SECRET
+                )
+            except Exception as e:
+                logging.warning(f"Stripe webhook signature invalid: {e}")
+                self.send_response(400)
+                self.end_headers()
+                return
 
             # Сразу отвечаем 200 чтобы Stripe не ретраил, обрабатываем фоном
             self.send_response(200)
