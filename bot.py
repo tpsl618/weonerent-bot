@@ -1721,14 +1721,20 @@ async def price_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Обработка сообщений ────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Апдейт без личного сообщения (пост в канале, его редактирование, служебное
+    # событие) сюда попадать не должен, но если попал - молча выходим.
+    msg = update.message
+    if msg is None or update.effective_chat is None or update.effective_chat.type != "private":
+        return
+
     chat_id = update.effective_chat.id
     ud = get_user(chat_id)
 
-    if update.message.contact:
-        phone = update.message.contact.phone_number
+    if msg.contact:
+        phone = msg.contact.phone_number
         text = f"+{phone}" if not phone.startswith("+") else phone
     else:
-        text = update.message.text
+        text = msg.text
 
     step = ud.get("step")
 
@@ -2884,8 +2890,11 @@ def main():
     app.add_handler(CallbackQueryHandler(menu_callback, pattern="^menu_|^resume_"))
     app.add_handler(CallbackQueryHandler(calendar_callback, pattern="^cal:"))
     app.add_handler(ChatMemberHandler(welcome_new_member, ChatMemberHandler.CHAT_MEMBER))
-    app.add_handler(MessageHandler(filters.CONTACT, handle_message))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # ChatType.PRIVATE обязателен: без него MessageHandler ловит ещё и посты канала
+    # с редактированиями (channel_post / edited_channel_post), где update.message = None,
+    # и handle_message падал с AttributeError на update.message.contact.
+    app.add_handler(MessageHandler(filters.CONTACT & filters.ChatType.PRIVATE, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, handle_message))
 
     # ─── Error handler — логирует ВСЕ ошибки, в чат шлёт только реальные баги ──
     # Транзиентные сетевые ошибки (RemoteProtocolError, NetworkError, TimedOut)
