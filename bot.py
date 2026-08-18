@@ -225,19 +225,27 @@ AI_SYSTEM_PROMPT = """Ты — Алекс, виртуальный консуль
 7. Язык: всегда RU (даже если вопрос на EN — переходи на RU с примечанием).
 
 ФАКТЫ О WEONERENT:
-• Локации: Аликанте (главный), Валенсия, Барселона, Малага, Севилья, Гранада, Калпе, Торревьеха, Гандия, Дения, Марбелья.
-• УТП: БЕЗ ДЕПОЗИТА. Карта НЕ блокируется (deposit from €0). Это уникально для Испании.
-• Цены: от €20–65/сутки в зависимости от города и класса (Эконом / Комфорт / SUV). Точная цена — после расчёта.
+• Локации (реальные точки выдачи): Аликанте аэропорт, Аликанте офис, Валенсия аэропорт, Валенсия офис, Торревьеха, Бенидорм, Альтеа, Кальпе, Дения, Гандия, Ла-Манга, Картахена. Другие города - по запросу, уточняет менеджер.
+• УТП: тариф Zero Deposit - карта НЕ блокируется вообще (€0 удержания). Это стоит €30/сутки и стоит в виджете по умолчанию.
+• Цены на авто: от €42/сутки. Кроссоверы от €65, крупные кроссоверы €70. Цена НЕ зависит от города, зависит от машины и срока. При аренде от 30 дней дешевле: месяц базового класса - €979 (это €32,63/сутки). Минимальный срок аренды — 3 дня.
 • Документы: водительские права 1+ год стажа, паспорт/ID, банковская карта Visa/Mastercard на фамилию водителя.
-• Возраст водителя: от 21 года (молодые водители 18-20 — по запросу).
-• Доп. услуги: детское кресло — БЕСПЛАТНО (включено), GPS, дополнительный водитель €5/сутки.
+• Возраст водителя: от 21 до 80 лет (ограничение системы бронирования).
+• Доп. услуги (цены из RentSyst, все платные):
+  - Детское кресло 0-3 года - 42 EUR за всю аренду (разово, не за сутки)
+  - Детское кресло 3-7 лет - 42 EUR за всю аренду
+  - Бустер 4-9 лет - 36 EUR за всю аренду
+  - Дополнительный водитель - 6 EUR/сутки за каждого (должен присутствовать при выдаче с правами и документом)
+  - Водитель 75+ - 85 EUR разово
+  - Вернуть машину с пустым баком, заправим сами - 55 EUR разово
+  - Выдача или возврат вне рабочих часов - 50 EUR за событие
+  Кресла и бустер оплачиваются один раз за аренду, а не посуточно: у большинства прокатов это плата за каждый день.
 • Доставка в аэропорт: БЕСПЛАТНО.
 • Поддержка: 24/7. Менеджер отвечает до 5 минут в рабочие часы (9:00–20:00 по Мадриду).
 • Можно дебетовой картой (для оплаты аренды). Залог тоже можно дебетовкой — мы не блокируем.
 • Карты МИР, UnionPay — не принимаем. Только Visa, Mastercard, Amex.
-• Страховка: базовая включена. Расширенная — €20/сутки. Полная — €30/сутки (с покрытием ДТП).
+• Страховые тарифы (цена за сутки, поверх цены авто): Essential €12 - удержание на карте €500; Comfort €18 - удержание €300, плюс круглосуточная помощь на дороге и эвакуация; Zero Deposit €30 - на карте не блокируется ничего, стоит по умолчанию; Premium €36 - удержание €0 и франшиза €0. Стёкла и шины покрыты на всех тарифах.
 • Топливо: машина даётся с полным баком, возвращается с полным.
-• Пробег: безлимитный по Испании.
+• Пробег: 200 км в сутки накопительно (за 7 дней это 1400 км). На тарифах Zero Deposit и Premium дневного лимита нет, до 4000 км в месяц. Сверх лимита €0,30 за км.
 • Можно ли везти в другую страну (Португалия, Франция): по запросу, доп. документы.
 • Что если рейс задержат: бесплатная задержка выдачи до 2 часов от расчётного времени, дальше — связь с менеджером.
 
@@ -498,9 +506,10 @@ def build_pre_quote_message(dates_text: str, days_estimate: int, city_key: str) 
     (легче принять решение → +20% конверсии в выбор авто).
     """
     prices = (PRICES.get(city_key) or {}) if city_key else {}
-    ep = prices.get("эконом", 22)
-    cp = prices.get("комфорт", 35)
-    sp = prices.get("suv", 48)
+    live = fetch_live_prices(city_key, days_estimate or 7) or {}
+    ep = (live.get("эконом")  or {}).get("day") or prices.get("эконом", 42)
+    cp = (live.get("комфорт") or {}).get("day") or prices.get("комфорт", 65)
+    sp = (live.get("suv")     or {}).get("day") or prices.get("suv", 70)
 
     if 3 <= days_estimate <= 60:
         # Используем calc_price чтобы учесть скидки за длительный срок если есть
@@ -517,11 +526,11 @@ def build_pre_quote_message(dates_text: str, days_estimate: int, city_key: str) 
             f"✅ Срок: {dates_text} ({days_estimate} дн.)\n\n"
             f"<b>Какой тип авто?</b>\n\n"
             f"🟢 <b>Эконом</b> — €{total_e} за {days_estimate} дн.\n"
-            f"   <i>Seat Ibiza, VW Polo</i> · парковка в центре, расход 5л\n\n"
+            f"   <i>Peugeot 208, Opel Astra, Kia Niro</i> · парковка в центре, экономичные\n\n"
             f"🔵 <b>Комфорт</b> — €{total_c} за {days_estimate} дн.\n"
-            f"   <i>Seat Leon, Skoda Octavia</i> · комфорт для 4 чел., A/C\n\n"
+            f"   <i>Toyota Corolla, Kia Stonic, Yaris Cross</i> · для 4 человек, A/C\n\n"
             f"🔴 <b>SUV</b> — €{total_s} за {days_estimate} дн.\n"
-            f"   <i>Seat Ateca, Kia Sportage</i> · горные дороги, 5 чемоданов"
+            f"   <i>Nissan Qashqai, Dacia Duster</i> · горные дороги, много багажа"
         )
 
     # Fallback — нет точного срока
@@ -754,17 +763,20 @@ def get_sheets_stats_this_week() -> dict:
     return result
 
 # ─── Калькулятор цен ────────────────────────────────────────────
+# Аварийный фолбэк. Живые цены берутся из /api/search (см. fetch_live_prices).
+# Числа сверены с прайсом RentSyst 18.08.2026: 42 / 65 / 70 EUR за сутки,
+# одинаковые во всех точках выдачи.
 PRICES = {
-    "барселона":   {"эконом": 32, "комфорт": 45, "suv": 58},
-    "малага":      {"эконом": 25, "комфорт": 38, "suv": 52},
-    "аликанте":    {"эконом": 22, "комфорт": 35, "suv": 48},
-    "мадрид":      {"эконом": 35, "комфорт": 50, "suv": 65},
-    "валенсия":    {"эконом": 24, "комфорт": 37, "suv": 50},
-    "севилья":     {"эконом": 26, "комфорт": 39, "suv": 53},
-    "торревьеха":  {"эконом": 20, "комфорт": 32, "suv": 45},
-    "гандия":      {"эконом": 22, "комфорт": 35, "suv": 48},
-    "дения":       {"эконом": 22, "комфорт": 35, "suv": 48},
-    "марбелья":    {"эконом": 28, "комфорт": 42, "suv": 55},
+    "аликанте":    {"эконом": 42, "комфорт": 65, "suv": 70},
+    "валенсия":    {"эконом": 42, "комфорт": 65, "suv": 70},
+    "торревьеха":  {"эконом": 42, "комфорт": 65, "suv": 70},
+    "бенидорм":    {"эконом": 42, "комфорт": 65, "suv": 70},
+    "альтеа":      {"эконом": 42, "комфорт": 65, "suv": 70},
+    "кальпе":      {"эконом": 42, "комфорт": 65, "suv": 70},
+    "дения":       {"эконом": 42, "комфорт": 65, "suv": 70},
+    "гандия":      {"эконом": 42, "комфорт": 65, "suv": 70},
+    "ла манга":    {"эконом": 42, "комфорт": 65, "suv": 70},
+    "картахена":   {"эконом": 42, "комфорт": 65, "suv": 70},
 }
 
 CITY_ALIASES = {
@@ -786,13 +798,115 @@ CAR_ALIASES = {
     "suv": "suv", "джип": "suv", "внедорожник": "suv",
 }
 
+# ─── Живые цены: тот же источник, что и у сайта ────────────────
+# Бот больше не считает по своей таблице. Цены берутся из нашего же
+# /api/search (воркер -> RentSyst), то есть совпадают с виджетом на сайте.
+# PRICES остаётся только аварийным фолбэком, если API недоступен.
+WOR_API_BASE = os.environ.get("WOR_API_BASE", "https://weonerent-api.agency-hight.workers.dev")
+
+# id точек выдачи из RentSyst (/api/config, сверено 18.08.2026)
+LOCATION_IDS = {
+    "аликанте":   20219,  # Alicante Airoport - основная точка
+    "валенсия":   20221,
+    "торревьеха": 20225,
+    "бенидорм":   20227,
+    "альтеа":     20229,
+    "кальпе":     20231,
+    "дения":      20233,
+    "гандия":     20235,
+    "ла манга":   20237,
+    "картахена":  20239,
+}
+DEFAULT_LOCATION_ID = 20219
+
+_price_cache: dict = {}          # (location_id, days) -> (timestamp, {класс: цена})
+_PRICE_CACHE_TTL = 6 * 3600      # 6 часов: цены меняются редко, API не хаммерим
+
+
+def _classify(price: float) -> str:
+    """Три класса по реальной цене прайса RentSyst: 42 / 65 / 70."""
+    if price <= 50:
+        return "эконом"
+    if price <= 67:
+        return "комфорт"
+    return "suv"
+
+
+def fetch_live_prices(city_key: str, days: int) -> dict | None:
+    """
+    Возвращает {"эконом": цена_за_сутки, "комфорт": ..., "suv": ...} из живого поиска.
+    None, если API не ответил. Кэш на 6 часов, таймаут 8 секунд.
+    """
+    import time as _time, datetime as _dt               # в этом модуле их нет на верхнем уровне
+    days = max(int(days or 7), 3)                       # минимальный срок аренды 3 дня
+    loc = LOCATION_IDS.get((city_key or "").lower().strip(), DEFAULT_LOCATION_ID)
+    key = (loc, days)
+    now = _time.time()
+    hit = _price_cache.get(key)
+    if hit and now - hit[0] < _PRICE_CACHE_TTL:
+        return hit[1]
+
+    start = _dt.datetime.now() + _dt.timedelta(days=14)  # типовое окно бронирования
+    start = start.replace(hour=10, minute=0, second=0, microsecond=0)
+    end = start + _dt.timedelta(days=days)
+    fmt = "%Y-%m-%d %H:%M:%S"
+    try:
+        resp = _requests.get(
+            f"{WOR_API_BASE}/api/search",
+            params={"date_from": start.strftime(fmt), "date_to": end.strftime(fmt),
+                    "pickup_location": loc},
+            timeout=8,
+        )
+        cars = resp.json()
+        if isinstance(cars, dict):
+            cars = cars.get("vehicles") or cars.get("data") or []
+        out: dict = {}
+        for c in cars:
+            try:
+                price = float(c.get("price"))
+            except (TypeError, ValueError):
+                continue
+            try:
+                total = float(str(c.get("total_price", "")).replace(" ", "") or price * days)
+            except (TypeError, ValueError):
+                total = price * days
+            cls = _classify(price)
+            # берём самую дешёвую машину класса и ЕЁ итог: в total_price уже
+            # учтена скидка за длительный срок (30 дней = 979.02, а не 42 x 30)
+            if cls not in out or price < out[cls]["day"]:
+                out[cls] = {"day": price, "total": round(total, 2)}
+        if not out:
+            return None
+        out.setdefault("комфорт", out.get("эконом"))
+        out.setdefault("suv", out.get("комфорт") or out.get("эконом"))
+        _price_cache[key] = (now, out)
+        return out
+    except Exception as e:
+        logger.warning("fetch_live_prices failed: %s", e)
+        stale = _price_cache.get(key)
+        return stale[1] if stale else None
+
+
 def calc_price(city_raw: str, car_raw: str, days: int):
+    """
+    Базовая цена за сутки и итог за срок. Сначала живые цены из /api/search,
+    при недоступности API - фолбэк на таблицу PRICES.
+    Возвращает цену АВТО без страхового тарифа: страховка считается отдельно,
+    ровно как в виджете на сайте.
+    """
     city = city_raw.lower().strip()
     car  = car_raw.lower().strip()
     city = CITY_ALIASES.get(city, city)
     car  = CAR_ALIASES.get(car, car)
+
+    live = fetch_live_prices(city, days)
+    if live:
+        item = live.get(car) or live.get("эконом")
+        if item:
+            return item["day"], item["total"]
+
     if city not in PRICES:
-        return None, None
+        city = "аликанте"
     if car not in PRICES[city]:
         car = "эконом"
     base  = PRICES[city][car]
@@ -905,6 +1019,13 @@ def parse_days(text: str) -> int:
             return b - a
 
     return 0
+
+def _live_from(cls: str, fallback: int) -> str:
+    """Цена 'от' для экрана стоимости. Живые данные, при сбое - фолбэк."""
+    live = fetch_live_prices("аликанте", 7) or {}
+    val = (live.get(cls) or {}).get("day") or fallback
+    return str(int(val)) if float(val).is_integer() else f"{val:.2f}"
+
 
 def get_user(chat_id):
     # app.user_data — defaultdict(dict), автоматически создаёт запись
@@ -1139,25 +1260,25 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "menu_price":
         user_data[chat_id] = {"step": None}
         await query.message.reply_text(
-            "💰 Ориентировочные цены на аренду авто:\n\n"
-            "🏙 Барселона — от €32/сутки\n"
-            "🏛 Мадрид — от €35/сутки\n"
-            "☀️ Малага — от €25/сутки\n"
-            "🌴 Аликанте — от €22/сутки\n"
-            "🏖 Валенсия — от €24/сутки\n"
-            "🎭 Севилья — от €26/сутки\n"
-            "🌊 Торревьеха — от €20/сутки\n"
-            "🏄 Гандия — от €22/сутки\n"
-            "⛵ Дения — от €22/сутки\n"
-            "🌴 Марбелья — от €28/сутки\n\n"
-            "Цены за сутки, от 3 дней.\n"
-            "\n"
-            "🛡 В аренду включена базовая страховка (гражданская ответственность).\n\n"
-            "Дополнительные пакеты:\n"
-            "• Расширенная страховка — €20/сутки: колёса, стёкла + 1 бесплатный вызов эвакуатора\n"
-            "• Максимальное покрытие — €30/сутки: колёса, стёкла, эвакуатор, ассистанс + "
-            "покрытие при ДТП (франшиза €500)\n\n"
-            "Хотите точный расчёт под ваши даты?",
+            f"💰 Цены на аренду авто:\n\n"
+            f"🟢 <b>Базовый класс</b> — от €{_live_from('эконом', 42)}/сутки\n"
+            f"   Peugeot 208, 308, 2008, Opel Astra, Kia Niro, Hyundai Ioniq\n\n"
+            f"🔵 <b>Кроссоверы</b> — от €{_live_from('комфорт', 65)}/сутки\n"
+            f"   Toyota Corolla, Yaris Cross, Kia Stonic, Dacia Duster, Citroen C3/C4 Aircross\n\n"
+            f"🔴 <b>Крупные кроссоверы</b> — от €{_live_from('suv', 70)}/сутки\n"
+            f"   Nissan Qashqai, Renault Symbioz\n\n"
+            f"Цена одинаковая во всех наших точках выдачи и зависит только от машины и срока.\n"
+            f"Минимальный срок — 3 дня. При аренде от 30 дней дешевле: месяц базового класса — €979, это €32,63 в сутки.\n\n"
+            f"Допы: детское кресло €42 за аренду (разово, не за сутки), бустер €36, "
+            f"второй водитель €6/сутки, выдача вне рабочих часов €50.\n\n"
+            f"🛡 Страховой тариф считается отдельно, за сутки:\n"
+            f"• Essential €12 — на карте удерживается €500\n"
+            f"• Comfort €18 — удержание €300, помощь на дороге и эвакуация\n"
+            f"• Zero Deposit €30 — на карте не блокируется ничего, стоит по умолчанию\n"
+            f"• Premium €36 — удержание €0, франшиза €0\n"
+            f"Стёкла и шины покрыты на всех тарифах.\n\n"
+            f"Хотите точный расчёт под ваши даты?",
+            parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🚗 Оформить заявку", callback_data="menu_apply")],
                 [InlineKeyboardButton("📞 Написать менеджеру", url=get_manager_url())],
@@ -2340,11 +2461,49 @@ async def send_lead(update, context, client_chat_id, ud):
         f"Chat ID: <code>{client_chat_id}</code>\n"
         f"Написать: <a href=\"tg://user?id={client_chat_id}\">открыть чат</a>"
     )
-    try:
-        await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=lead, parse_mode="HTML")
-        logger.info(f"Заявка отправлена от {username}")
-    except Exception as e:
-        logger.error(f"Ошибка отправки: {e}")
+    # 2026-05-12: Robust lead notification with retry + plain-text fallback.
+    # Previous code silently lost lead notifications when Telegram failed (race conditions
+    # during Railway redeploys, HTML parse errors, network blips). Now: 3 retries with
+    # backoff, then plain-text fallback (no HTML parse_mode), then Sentry alert.
+    notification_sent = False
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=lead, parse_mode="HTML")
+            logger.info(f"Заявка отправлена от {username} (attempt {attempt})")
+            notification_sent = True
+            break
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Lead notification attempt {attempt}/3 failed: {e}")
+            if attempt < 3:
+                await asyncio.sleep(2 ** attempt)  # 2s, 4s backoff
+
+    # Fallback: plain-text without parse_mode (avoids HTML parse errors)
+    if not notification_sent:
+        try:
+            plain = lead.replace("<code>", "").replace("</code>", "").replace("<a href=\"", "").replace("\">открыть чат</a>", " (открыть чат)")
+            # Strip any remaining HTML tags
+            import re as _re
+            plain = _re.sub(r"<[^>]+>", "", plain)
+            await context.bot.send_message(chat_id=OWNER_CHAT_ID, text=f"⚠️ PLAIN FALLBACK (HTML failed)\n\n{plain}")
+            logger.warning(f"Lead delivered via plain-text fallback for {username}")
+            notification_sent = True
+        except Exception as e:
+            logger.error(f"Lead plain-text fallback FAILED for {username}: {e}")
+
+    # Last resort: Sentry alert + store in KV for manual recovery
+    if not notification_sent:
+        try:
+            if _sentry_sdk:
+                _sentry_sdk.capture_message(
+                    f"CRITICAL: Lead notification FAILED for {username}",
+                    level="error",
+                    extras={"chat_id": client_chat_id, "lead": lead[:500], "error": str(last_error)}
+                )
+        except Exception:
+            pass
+        logger.critical(f"LEAD LOST FOR {username} — check Sheets + Sentry: {last_error}")
 
     # Сохраняем в Google Sheets (в отдельном потоке — не блокируем event loop)
     try:
